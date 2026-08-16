@@ -1,0 +1,3 @@
+*.jar binary
+*.so binary
+*.tflite binary
