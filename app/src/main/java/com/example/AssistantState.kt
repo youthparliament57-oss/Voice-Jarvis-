@@ -5,5 +5,6 @@ enum class AssistantState {
     IDLE,
     LISTENING,
     UNDERSTANDING,
-    SPEAKING
+    SPEAKING,
+    ERROR
 }

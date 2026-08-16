@@ -1,21 +1,52 @@
 package com.example.utils
 
+import android.Manifest
 import android.app.AppOpsManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Process
 import android.provider.Settings
+import androidx.core.content.ContextCompat
 
 object PermissionsHelper {
-    
+
+    fun hasAudioPermission(context: Context): Boolean {
+        return ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    fun hasContactsPermission(context: Context): Boolean {
+        return ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_CONTACTS
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    fun hasNotificationPermission(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
     fun hasOverlayPermission(context: Context): Boolean {
         return Settings.canDrawOverlays(context)
     }
 
     fun getOverlayPermissionIntent(context: Context): Intent {
-        return Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}"))
+        return Intent(
+            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            Uri.parse("package:${context.packageName}")
+        )
     }
 
     fun hasUsageStatsPermission(context: Context): Boolean {
@@ -42,7 +73,12 @@ object PermissionsHelper {
         )
     }
 
-    fun getUsageStatsPermissionIntent(): Intent {
+    /**
+     * Note: Do NOT attach Uri.parse("package:${context.packageName}") to ACTION_USAGE_ACCESS_SETTINGS!
+     * Attaching data URI to ACTION_USAGE_ACCESS_SETTINGS causes Android's Settings app to crash
+     * or close immediately on Android 10+ (MIUI, OneUI, ColorOS, Stock Android).
+     */
+    fun getUsageStatsPermissionIntent(context: Context): Intent {
         return Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
     }
 }

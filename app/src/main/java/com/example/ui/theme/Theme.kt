@@ -1,50 +1,44 @@
 package com.example.ui.theme
 
-import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.platform.LocalContext
 
-private val JarvisDarkColorScheme =
-  darkColorScheme(
-    primary = CyanAccent, 
-    secondary = BlueAccent, 
-    tertiary = TealAccent,
-    background = DarkBackground,
-    surface = DarkSurface,
-    onPrimary = DarkBackground,
-    onSecondary = DarkBackground,
-    onTertiary = DarkBackground,
-    onBackground = LightText,
-    onSurface = LightText
-  )
-
-private val JarvisLightColorScheme =
-  lightColorScheme(
-    primary = CyanAccent,
-    secondary = BlueAccent,
-    tertiary = TealAccent,
-    background = DarkBackground,
-    surface = DarkSurface,
-    onPrimary = DarkBackground,
-    onSecondary = DarkBackground,
-    onTertiary = DarkBackground,
-    onBackground = LightText,
-    onSurface = LightText
-  )
+private val JarvisMonochromeColorScheme = darkColorScheme(
+    primary = PureWhite,
+    onPrimary = OledBlack,
+    primaryContainer = OffWhite,
+    onPrimaryContainer = OledBlack,
+    secondary = OffWhite,
+    onSecondary = OledBlack,
+    secondaryContainer = DarkGray,
+    onSecondaryContainer = PureWhite,
+    tertiary = SilverText,
+    onTertiary = OledBlack,
+    background = OledBlack,
+    onBackground = PureWhite,
+    surface = DarkCharcoal,
+    onSurface = PureWhite,
+    surfaceVariant = DarkCardSurface,
+    onSurfaceVariant = SilverText,
+    outline = SurfaceBorder,
+    outlineVariant = SurfaceBorderHighlight,
+    error = ErrorRedAlert,
+    onError = PureWhite,
+    errorContainer = ErrorContainerDark,
+    onErrorContainer = PureWhite
+)
 
 @Composable
 fun JarvisTheme(
-  darkTheme: Boolean = true, // Force dark theme for JARVIS
-  dynamicColor: Boolean = false, // Disable dynamic colors to keep the tech look
-  content: @Composable () -> Unit,
+    darkTheme: Boolean = true,
+    dynamicColor: Boolean = false,
+    content: @Composable () -> Unit,
 ) {
-  val colorScheme = if (darkTheme) JarvisDarkColorScheme else JarvisLightColorScheme
-
-  MaterialTheme(colorScheme = colorScheme, typography = Typography, content = content)
+    MaterialTheme(
+        colorScheme = JarvisMonochromeColorScheme,
+        typography = Typography,
+        content = content
+    )
 }

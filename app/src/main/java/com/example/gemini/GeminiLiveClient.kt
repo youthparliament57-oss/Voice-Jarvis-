@@ -1,6 +1,9 @@
 package com.example.gemini
 
+import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Context
+import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
@@ -8,6 +11,7 @@ import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.util.Base64
 import android.util.Log
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -25,9 +29,13 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-class GeminiLiveClient(private val apiKey: String) {
+class GeminiLiveClient(
+    private val context: Context,
+    private val apiKey: String
+) {
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
         .build()
 
     private var webSocket: WebSocket? = null
@@ -35,10 +43,11 @@ class GeminiLiveClient(private val apiKey: String) {
 
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
-    @Volatile private var isRecording = false
+
+    @Volatile
+    private var isRecording = false
 
     private val audioPlaybackChannel = Channel<ByteArray>(Channel.UNLIMITED)
-
     private val _stateFlow = MutableSharedFlow<LiveState>(extraBufferCapacity = 1)
     val stateFlow: SharedFlow<LiveState> = _stateFlow
 
@@ -47,14 +56,22 @@ class GeminiLiveClient(private val apiKey: String) {
     }
 
     fun connect() {
-        if (webSocket != null) return // Already connected
+        if (apiKey.isBlank()) {
+            Log.e("GeminiLiveClient", "API Key is empty. Cannot connect to Gemini Live.")
+            _stateFlow.tryEmit(LiveState.ERROR)
+            return
+        }
+
+        if (webSocket != null) return // Already connecting/connected
+
         _stateFlow.tryEmit(LiveState.CONNECTING)
+
         val url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=$apiKey"
         val request = Request.Builder().url(url).build()
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.d("GeminiLiveClient", "WebSocket Opened")
+                Log.d("GeminiLiveClient", "WebSocket Opened successfully")
                 sendSetupMessage()
             }
 
@@ -66,10 +83,11 @@ class GeminiLiveClient(private val apiKey: String) {
                 Log.d("GeminiLiveClient", "WebSocket Closed: $reason")
                 _stateFlow.tryEmit(LiveState.DISCONNECTED)
                 stopAudioIO()
+                this@GeminiLiveClient.webSocket = null
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e("GeminiLiveClient", "WebSocket Error", t)
+                Log.e("GeminiLiveClient", "WebSocket Failure: ${t.message}", t)
                 _stateFlow.tryEmit(LiveState.ERROR)
                 stopAudioIO()
                 this@GeminiLiveClient.webSocket = null
@@ -78,50 +96,53 @@ class GeminiLiveClient(private val apiKey: String) {
     }
 
     private fun sendSetupMessage() {
-        val setupMsg = JSONObject().apply {
-            put("setup", JSONObject().apply {
-                put("model", "models/gemini-2.5-flash")
-                put("systemInstruction", JSONObject().apply {
-                    put("parts", JSONArray().apply {
-                        put(JSONObject().apply {
-                            put("text", "You are an advanced, proactive AI assistant named JARVIS. You act as a highly intelligent, fast-responding voice companion. Speak naturally, concisely, and conversationally. Do not use markdown, emojis, or lists in your spoken response. You have a male, formal but friendly voice. You can be interrupted at any time.")
+        try {
+            val setupMsg = JSONObject().apply {
+                put("setup", JSONObject().apply {
+                    put("model", "models/gemini-2.5-flash")
+                    put("systemInstruction", JSONObject().apply {
+                        put("parts", JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("text", "You are an advanced, proactive AI assistant named JARVIS. Speak naturally, concisely, and conversationally. Do not use markdown, emojis, or lists in your spoken response. Speak in a confident, clear tone. You can be interrupted at any time.")
+                            })
                         })
                     })
-                })
-                put("generationConfig", JSONObject().apply {
-                    put("responseModalities", JSONArray().apply { put("AUDIO") })
-                    put("speechConfig", JSONObject().apply {
-                        put("voiceConfig", JSONObject().apply {
-                            put("prebuiltVoiceConfig", JSONObject().apply {
-                                put("voiceName", "Aoede") 
+                    put("generationConfig", JSONObject().apply {
+                        put("responseModalities", JSONArray().apply { put("AUDIO") })
+                        put("speechConfig", JSONObject().apply {
+                            put("voiceConfig", JSONObject().apply {
+                                put("prebuiltVoiceConfig", JSONObject().apply {
+                                    put("voiceName", "Aoede")
+                                })
                             })
                         })
                     })
                 })
-            })
+            }
+            webSocket?.send(setupMsg.toString())
+        } catch (e: Exception) {
+            Log.e("GeminiLiveClient", "Error sending setup message", e)
+            _stateFlow.tryEmit(LiveState.ERROR)
         }
-        webSocket?.send(setupMsg.toString())
     }
 
     private fun handleMessage(text: String) {
         try {
             val json = JSONObject(text)
-            
+
             if (json.has("setupComplete")) {
-                Log.d("GeminiLiveClient", "Setup Complete")
+                Log.d("GeminiLiveClient", "Setup Complete!")
                 _stateFlow.tryEmit(LiveState.CONNECTED)
                 startAudioIO()
             } else if (json.has("serverContent")) {
                 val serverContent = json.getJSONObject("serverContent")
-                
+
                 if (serverContent.optBoolean("interrupted", false)) {
-                    Log.d("GeminiLiveClient", "Interrupted by user!")
-                    
-                    // Clear the pending audio buffer
+                    Log.d("GeminiLiveClient", "User interrupted model speaking")
                     var cleared = 0
                     while (audioPlaybackChannel.tryReceive().isSuccess) { cleared++ }
                     Log.d("GeminiLiveClient", "Cleared $cleared pending audio chunks")
-                    
+
                     audioTrack?.pause()
                     audioTrack?.flush()
                     audioTrack?.play()
@@ -144,20 +165,29 @@ class GeminiLiveClient(private val apiKey: String) {
                         }
                     }
                 }
-                
+
                 if (serverContent.optBoolean("turnComplete", false)) {
                     Log.d("GeminiLiveClient", "Turn Complete")
                     _stateFlow.tryEmit(LiveState.LISTENING)
                 }
             }
         } catch (e: Exception) {
-            Log.e("GeminiLiveClient", "Error parsing message", e)
+            Log.e("GeminiLiveClient", "Error handling message", e)
         }
     }
 
     @SuppressLint("MissingPermission")
     private fun startAudioIO() {
         if (isRecording) return
+
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.e("GeminiLiveClient", "Cannot start audio input: RECORD_AUDIO permission missing")
+            _stateFlow.tryEmit(LiveState.ERROR)
+            return
+        }
+
         isRecording = true
 
         // Playback: 24kHz Mono 16-bit PCM
@@ -165,24 +195,29 @@ class GeminiLiveClient(private val apiKey: String) {
         val outBufferSize = AudioTrack.getMinBufferSize(
             outSampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
         ) * 4
-        @Suppress("DEPRECATION")
-        audioTrack = AudioTrack(
-            AudioManager.STREAM_MUSIC,
-            outSampleRate,
-            AudioFormat.CHANNEL_OUT_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            outBufferSize,
-            AudioTrack.MODE_STREAM
-        )
-        audioTrack?.play()
 
-        // Start playback coroutine
-        coroutineScope.launch {
-            for (pcmData in audioPlaybackChannel) {
-                if (audioTrack?.playState == AudioTrack.PLAYSTATE_PLAYING) {
-                    audioTrack?.write(pcmData, 0, pcmData.size)
+        try {
+            @Suppress("DEPRECATION")
+            audioTrack = AudioTrack(
+                AudioManager.STREAM_MUSIC,
+                outSampleRate,
+                AudioFormat.CHANNEL_OUT_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                outBufferSize,
+                AudioTrack.MODE_STREAM
+            )
+            audioTrack?.play()
+
+            // Playback coroutine
+            coroutineScope.launch {
+                for (pcmData in audioPlaybackChannel) {
+                    if (audioTrack?.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                        audioTrack?.write(pcmData, 0, pcmData.size)
+                    }
                 }
             }
+        } catch (e: Exception) {
+            Log.e("GeminiLiveClient", "AudioTrack setup error", e)
         }
 
         // Recording: 16kHz Mono 16-bit PCM
@@ -190,53 +225,69 @@ class GeminiLiveClient(private val apiKey: String) {
         val inBufferSize = AudioRecord.getMinBufferSize(
             inSampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
         ) * 2
-        audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
-            inSampleRate,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            inBufferSize
-        )
-        audioRecord?.startRecording()
 
-        coroutineScope.launch {
-            val buffer = ByteArray(2048)
-            while (isActive && isRecording) {
-                val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
-                if (read > 0) {
-                    val encoded = Base64.encodeToString(buffer, 0, read, Base64.NO_WRAP)
-                    val json = JSONObject().apply {
-                        put("realtimeInput", JSONObject().apply {
-                            put("mediaChunks", JSONArray().apply {
-                                put(JSONObject().apply {
-                                    put("mimeType", "audio/pcm;rate=16000")
-                                    put("data", encoded)
+        try {
+            audioRecord = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                inSampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                inBufferSize
+            )
+
+            if (audioRecord?.state == AudioRecord.STATE_INITIALIZED) {
+                audioRecord?.startRecording()
+
+                coroutineScope.launch {
+                    val buffer = ByteArray(2048)
+                    while (isActive && isRecording) {
+                        val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+                        if (read > 0) {
+                            val encoded = Base64.encodeToString(buffer, 0, read, Base64.NO_WRAP)
+                            val json = JSONObject().apply {
+                                put("realtimeInput", JSONObject().apply {
+                                    put("mediaChunks", JSONArray().apply {
+                                        put(JSONObject().apply {
+                                            put("mimeType", "audio/pcm;rate=16000")
+                                            put("data", encoded)
+                                        })
+                                    })
                                 })
-                            })
-                        })
+                            }
+                            webSocket?.send(json.toString())
+                        }
                     }
-                    webSocket?.send(json.toString())
                 }
+            } else {
+                Log.e("GeminiLiveClient", "AudioRecord initialization failed")
             }
+        } catch (e: Exception) {
+            Log.e("GeminiLiveClient", "AudioRecord setup error", e)
         }
-        
+
         _stateFlow.tryEmit(LiveState.LISTENING)
     }
 
     private fun stopAudioIO() {
         isRecording = false
-        audioRecord?.stop()
-        audioRecord?.release()
+        try {
+            audioRecord?.stop()
+            audioRecord?.release()
+        } catch (_: Exception) {}
         audioRecord = null
 
-        audioTrack?.stop()
-        audioTrack?.release()
+        try {
+            audioTrack?.stop()
+            audioTrack?.release()
+        } catch (_: Exception) {}
         audioTrack = null
     }
 
     fun disconnect() {
         stopAudioIO()
-        webSocket?.close(1000, "User disconnected")
+        try {
+            webSocket?.close(1000, "User requested disconnect")
+        } catch (_: Exception) {}
         webSocket = null
         _stateFlow.tryEmit(LiveState.DISCONNECTED)
     }
