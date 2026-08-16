@@ -197,15 +197,35 @@ class GeminiLiveClient(
         ) * 4
 
         try {
-            @Suppress("DEPRECATION")
-            audioTrack = AudioTrack(
-                AudioManager.STREAM_MUSIC,
-                outSampleRate,
-                AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                outBufferSize,
-                AudioTrack.MODE_STREAM
-            )
+            audioTrack = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                AudioTrack.Builder()
+                    .setAudioAttributes(
+                        android.media.AudioAttributes.Builder()
+                            .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(outSampleRate)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(outBufferSize)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build()
+            } else {
+                @Suppress("DEPRECATION")
+                AudioTrack(
+                    AudioManager.STREAM_MUSIC,
+                    outSampleRate,
+                    AudioFormat.CHANNEL_OUT_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    outBufferSize,
+                    AudioTrack.MODE_STREAM
+                )
+            }
             audioTrack?.play()
 
             // Playback coroutine

@@ -15,17 +15,37 @@ class SettingsRepository(private val context: Context) {
     }
 
     private val sharedPreferences: SharedPreferences by lazy {
-        val masterKey = MasterKey.Builder(context)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
+        try {
+            val masterKey = MasterKey.Builder(context)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
 
-        EncryptedSharedPreferences.create(
-            context,
-            PREFS_FILENAME,
-            masterKey,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
+            EncryptedSharedPreferences.create(
+                context,
+                PREFS_FILENAME,
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+        } catch (e: Exception) {
+            android.util.Log.e("SettingsRepository", "EncryptedSharedPreferences error, recreating preferences file", e)
+            try {
+                context.deleteSharedPreferences(PREFS_FILENAME)
+                val masterKey = MasterKey.Builder(context)
+                    .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                    .build()
+                EncryptedSharedPreferences.create(
+                    context,
+                    PREFS_FILENAME,
+                    masterKey,
+                    EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                    EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+                )
+            } catch (fallbackEx: Exception) {
+                android.util.Log.e("SettingsRepository", "Falling back to standard SharedPreferences", fallbackEx)
+                context.getSharedPreferences(PREFS_FILENAME, Context.MODE_PRIVATE)
+            }
+        }
     }
 
     private val _apiKeyFlow = MutableStateFlow(getApiKey() ?: "")

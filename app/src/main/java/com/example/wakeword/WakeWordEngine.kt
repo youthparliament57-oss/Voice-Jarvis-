@@ -144,7 +144,7 @@ class WakeWordEngine(private val context: Context) {
                                             if ((name.contains("jarvis") || name.contains("hey") || name == "1") && score > 0.4f) {
                                                 Log.d("WakeWordEngine", "WAKE WORD DETECTED! Keyword: $name, Score: $score")
                                                 _wakeWordDetected.tryEmit(Unit)
-                                                Thread.sleep(1500)
+                                                try { Thread.sleep(1500) } catch (_: InterruptedException) { break }
                                                 break
                                             }
                                         }
@@ -166,14 +166,14 @@ class WakeWordEngine(private val context: Context) {
                                     Log.d("WakeWordEngine", "Voice Activity / Wake Word triggered by energy (RMS: $rms)")
                                     _wakeWordDetected.tryEmit(Unit)
                                     consecutiveHighVolumeFrames = 0
-                                    Thread.sleep(2000)
+                                    try { Thread.sleep(2000) } catch (_: InterruptedException) { break }
                                 }
                             } else {
                                 consecutiveHighVolumeFrames = 0
                             }
                         }
                     } else {
-                        Thread.sleep(10)
+                        try { Thread.sleep(10) } catch (_: InterruptedException) { break }
                     }
                 }
                 Log.d("WakeWordEngine", "Wake-word listening thread exited")
@@ -193,7 +193,8 @@ class WakeWordEngine(private val context: Context) {
             Log.w("WakeWordEngine", "Error stopping audio record: ${e.message}")
         }
         try {
-            listeningThread?.join(500)
+            listeningThread?.interrupt()
+            listeningThread?.join(300)
         } catch (_: Exception) {}
         listeningThread = null
     }
