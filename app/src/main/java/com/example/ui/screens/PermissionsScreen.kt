@@ -127,7 +127,9 @@ fun PermissionsScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(OledBlack),
+            .background(OledBlack)
+            .statusBarsPadding()
+            .navigationBarsPadding(),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         if (isFromSettings) {
@@ -159,92 +161,101 @@ fun PermissionsScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 20.dp, vertical = 12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+                .padding(horizontal = 22.dp, vertical = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
-            if (!isFromSettings) {
-                Text(
-                    text = "PERMISSIONS SETUP",
-                    style = MaterialTheme.typography.headlineMedium,
-                    color = PureWhite,
-                    fontWeight = FontWeight.Black,
-                    letterSpacing = 2.sp,
-                    modifier = Modifier.padding(top = 16.dp, bottom = 8.dp)
-                )
-
-                Text(
-                    text = "Configure system access required for local wake-word detection and floating alien assistant 👽 HUD overlay.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = SilverText,
-                    modifier = Modifier.padding(bottom = 18.dp)
-                )
-            }
-
-            LazyColumn(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f, fill = false),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // 1. Microphone Access
-                item {
-                    PermissionCard(
-                        icon = Icons.Default.Mic,
-                        title = "Microphone Access",
-                        description = "Required for continuous 'Hey Jarvis' wake word audio sampling.",
-                        isGranted = hasMicPermission,
-                        isRequired = true,
-                        onRequest = { micLauncher.launch(Manifest.permission.RECORD_AUDIO) }
+                if (!isFromSettings) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "PERMISSIONS SETUP",
+                        style = MaterialTheme.typography.headlineMedium,
+                        color = PureWhite,
+                        fontWeight = FontWeight.Black,
+                        letterSpacing = 2.sp,
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    )
+
+                    Text(
+                        text = "Configure system access required for local wake-word detection and floating alien assistant 👽 HUD overlay.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = SilverText,
+                        modifier = Modifier.padding(bottom = 20.dp)
                     )
                 }
 
-                // 2. Display Over Other Apps (Overlay)
-                item {
-                    PermissionCard(
-                        icon = Icons.Default.Window,
-                        title = "Display Over Other Apps (Overlay)",
-                        description = "Required to draw the floating alien assistant 👽 HUD on top of other apps when activated.",
-                        isGranted = hasOverlayPermission,
-                        isRequired = true,
-                        onRequest = {
-                            overlayLauncher.launch(PermissionsHelper.getOverlayPermissionIntent(context))
-                        }
-                    )
-                }
-
-                // 3. Notifications
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    // 1. Microphone Access
                     item {
                         PermissionCard(
-                            icon = Icons.Default.Notifications,
-                            title = "Notifications",
-                            description = "Enables foreground service status notification bar controls.",
-                            isGranted = hasNotificationPermission,
+                            icon = Icons.Default.Mic,
+                            title = "Microphone Access",
+                            description = "Required for continuous 'Hey Jarvis' wake word audio sampling.",
+                            isGranted = hasMicPermission,
+                            isRequired = true,
+                            onRequest = { micLauncher.launch(Manifest.permission.RECORD_AUDIO) }
+                        )
+                    }
+
+                    // 2. Display Over Other Apps (Overlay)
+                    item {
+                        PermissionCard(
+                            icon = Icons.Default.Window,
+                            title = "Display Over Other Apps (Overlay)",
+                            description = "Required to draw the floating alien assistant 👽 HUD on top of other apps when activated.",
+                            isGranted = hasOverlayPermission,
+                            isRequired = true,
+                            onRequest = {
+                                overlayLauncher.launch(PermissionsHelper.getOverlayPermissionIntent(context))
+                            }
+                        )
+                    }
+
+                    // 3. Notifications
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        item {
+                            PermissionCard(
+                                icon = Icons.Default.Notifications,
+                                title = "Notifications",
+                                description = "Enables foreground service status notification bar controls.",
+                                isGranted = hasNotificationPermission,
+                                isRequired = false,
+                                onRequest = {
+                                    notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                            )
+                        }
+                    }
+
+                    // 4. Contacts Access
+                    item {
+                        PermissionCard(
+                            icon = Icons.Default.People,
+                            title = "Contacts Access",
+                            description = "Optional. Enables voice calling and contact lookup commands.",
+                            isGranted = hasContactsPermission,
                             isRequired = false,
                             onRequest = {
-                                notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                contactsLauncher.launch(Manifest.permission.READ_CONTACTS)
                             }
                         )
                     }
                 }
-
-                // 4. Contacts Access
-                item {
-                    PermissionCard(
-                        icon = Icons.Default.People,
-                        title = "Contacts Access",
-                        description = "Optional. Enables voice calling and contact lookup commands.",
-                        isGranted = hasContactsPermission,
-                        isRequired = false,
-                        onRequest = {
-                            contactsLauncher.launch(Manifest.permission.READ_CONTACTS)
-                        }
-                    )
-                }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
-
             Column(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 20.dp, bottom = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Button(

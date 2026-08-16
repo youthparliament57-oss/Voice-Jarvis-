@@ -37,6 +37,8 @@ import com.example.gemini.GeminiLiveClient
 import com.example.ui.screens.JarvisOverlay
 import com.example.ui.theme.JarvisTheme
 import com.example.utils.PermissionsHelper
+import com.example.AppState
+import com.example.AssistantStateManager
 import com.example.wakeword.WakeWordEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -102,6 +104,7 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
 
     override fun onCreate() {
         super.onCreate()
+        com.example.audio.AudioController.init(this)
         savedStateRegistryController.performRestore(null)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
 
@@ -168,8 +171,10 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
             wakeWordEngine.wakeWordDetected.collect {
                 if (assistantState == AssistantState.IDLE) {
                     if (apiKey.isNotEmpty()) {
-                        Log.d("JarvisService", "Wake word heard. Triggering Gemini Live session.")
+                        Log.d("JarvisService", "Wake word heard! Stopping WakeWord listener and starting Gemini Live.")
+                        updateAssistantState(AssistantState.LISTENING)
                         wakeWordEngine.stopListening()
+                        delay(200) // Give Android HAL time to release hardware mic
                         startGeminiLiveSession()
                     } else {
                         val keyErr = "API Key missing! Please set your Gemini API key in Settings."
@@ -187,19 +192,24 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
     }
 
     private fun startWakeWordMode() {
+        AssistantStateManager.updateState(AppState.WAKE_LISTENING)
         updateAssistantState(AssistantState.IDLE)
         geminiLiveClient?.disconnect()
         geminiLiveClient = null
         sessionTimeoutJob?.cancel()
 
         if (PermissionsHelper.hasAudioPermission(this)) {
-            wakeWordEngine.startListening()
+            serviceScope.launch {
+                delay(200)
+                wakeWordEngine.startListening()
+            }
         } else {
             JarvisServiceState.setError("Microphone permission missing. Please grant Microphone access.")
         }
     }
 
     private fun startGeminiLiveSession() {
+        AssistantStateManager.updateState(AppState.ACTIVE_CONVERSATION)
         if (geminiLiveClient != null) return
 
         if (!PermissionsHelper.hasAudioPermission(this)) {
@@ -215,25 +225,32 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
             geminiLiveClient?.stateFlow?.collect { state ->
                 resetSessionTimer()
                 when (state) {
-                    GeminiLiveClient.LiveState.CONNECTING -> {
+                    is GeminiLiveClient.LiveState.IDLE -> {
+                        updateAssistantState(AssistantState.IDLE)
+                    }
+                    is GeminiLiveClient.LiveState.CONNECTING -> {
                         updateAssistantState(AssistantState.UNDERSTANDING)
                     }
-                    GeminiLiveClient.LiveState.CONNECTED,
-                    GeminiLiveClient.LiveState.LISTENING -> {
+                    is GeminiLiveClient.LiveState.CONNECTED,
+                    is GeminiLiveClient.LiveState.LISTENING -> {
                         updateAssistantState(AssistantState.LISTENING)
                     }
-                    GeminiLiveClient.LiveState.SPEAKING -> {
+                    is GeminiLiveClient.LiveState.SPEAKING -> {
                         updateAssistantState(AssistantState.SPEAKING)
                     }
-                    GeminiLiveClient.LiveState.ERROR -> {
-                        val errMsg = "Voice Connection Error (Check API Key / Network)"
+                    is GeminiLiveClient.LiveState.RECONNECTING -> {
+                        Log.d("JarvisService", "Reconnecting to Gemini Live attempt ${state.attempt}/${state.maxAttempts}")
+                        updateAssistantState(AssistantState.UNDERSTANDING)
+                    }
+                    is GeminiLiveClient.LiveState.ERROR -> {
+                        val errMsg = state.message.ifBlank { "Voice Connection Error (Check API Key / Network)" }
                         updateAssistantState(AssistantState.ERROR, errMsg)
                         serviceScope.launch {
-                            delay(3000)
+                            delay(3500)
                             startWakeWordMode()
                         }
                     }
-                    GeminiLiveClient.LiveState.DISCONNECTED -> {
+                    is GeminiLiveClient.LiveState.DISCONNECTED -> {
                         startWakeWordMode()
                     }
                 }
@@ -320,6 +337,7 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
         store.clear()
 
         JarvisServiceState.updateRunning(false)
+        AssistantStateManager.updateState(AppState.IDLE)
         JarvisServiceState.updateState(AssistantState.IDLE)
 
         wakeWordEngine.destroy()

@@ -4,96 +4,100 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.google.mediapipe.tasks.audio.audioclassifier.AudioClassifier
 import com.google.mediapipe.tasks.components.containers.AudioData
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
-import kotlin.math.sqrt
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import java.nio.MappedByteBuffer
+import java.nio.channels.FileChannel
+import com.example.audio.AudioController
+import kotlinx.coroutines.*
 
-class WakeWordEngine(private val context: Context) {
+class WakeWordEngine(
+    private val context: Context,
+    private val wakeThreshold: Float = 0.50f,
+    private val cooldownMs: Long = 2000L,
+    private val targetLabels: Set<String> = setOf("hey_jarvis", "jarvis", "hey jarvis")
+) {
+
+    sealed class EngineState {
+        object UNINITIALIZED : EngineState()
+        object INITIALIZING : EngineState()
+        object READY : EngineState()
+        object LISTENING : EngineState()
+        object DETECTED : EngineState()
+        object COOLDOWN : EngineState()
+        object MODEL_UNAVAILABLE : EngineState()
+        object MIC_UNAVAILABLE : EngineState()
+        object STOPPED : EngineState()
+        data class ERROR(val message: String) : EngineState()
+    }
 
     private var classifier: AudioClassifier? = null
     private var audioData: AudioData? = null
-    private var audioRecord: AudioRecord? = null
 
     @Volatile
     private var isListening = false
-    private var listeningThread: Thread? = null
+    private var listeningJob: Job? = null
+    private val engineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    private var lastDetectionTime: Long = 0L
+
+    private val _engineState = MutableStateFlow<EngineState>(EngineState.UNINITIALIZED)
+    val engineState: StateFlow<EngineState> = _engineState.asStateFlow()
 
     private val _wakeWordDetected = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val wakeWordDetected: SharedFlow<Unit> = _wakeWordDetected
 
-    private var isFallbackEnergyDetector = false
-
     fun initialize() {
+        if (_engineState.value == EngineState.INITIALIZING) return
+        _engineState.value = EngineState.INITIALIZING
+
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
         ) {
-            Log.e("WakeWordEngine", "RECORD_AUDIO permission not granted. Cannot initialize audio recorder.")
+            _engineState.value = EngineState.MIC_UNAVAILABLE
             return
         }
 
         try {
-            // Try model names
-            val modelNames = listOf("hey_jarvis.tflite", "speech_commands.tflite")
-            var modelLoaded = false
+            val modelBuffer = findAndLoadModelAsset(context)
 
-            for (model in modelNames) {
-                try {
-                    classifier = AudioClassifier.createFromFile(context, model)
-                    modelLoaded = true
-                    Log.d("WakeWordEngine", "Successfully loaded model: $model")
-                    break
-                } catch (e: Exception) {
-                    Log.w("WakeWordEngine", "Model $model not found or failed to load: ${e.message}")
-                }
-            }
-
-            if (!modelLoaded) {
-                Log.w("WakeWordEngine", "No TFLite classifier loaded. Using RMS Voice Energy fallback detector.")
-                isFallbackEnergyDetector = true
-            }
-
-            // 16kHz, mono, PCM 16-bit
-            val sampleRate = 16000
-            val channelConfig = AudioFormat.CHANNEL_IN_MONO
-            val audioFormat = AudioFormat.ENCODING_PCM_16BIT
-
-            val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
-            val bufferSize = (minBufferSize * 2).coerceAtLeast(4096)
-
-            @SuppressLint("MissingPermission")
-            audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                sampleRate,
-                channelConfig,
-                audioFormat,
-                bufferSize
-            )
-
-            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                Log.e("WakeWordEngine", "AudioRecord failed to initialize")
-                audioRecord = null
+            if (modelBuffer != null) {
+                val options = AudioClassifier.AudioClassifierOptions.builder()
+                    .setBaseOptions(
+                        com.google.mediapipe.tasks.core.BaseOptions.builder()
+                            .setModelAssetBuffer(modelBuffer)
+                            .build()
+                    )
+                    .build()
+                classifier = AudioClassifier.createFromOptions(context, options)
+                Log.d("WakeWordEngine", "TFLite AudioClassifier created successfully")
+            } else {
+                Log.w("WakeWordEngine", "No valid TFLite wake-word model found in assets. Engine set to MODEL_UNAVAILABLE.")
+                _engineState.value = EngineState.MODEL_UNAVAILABLE
                 return
             }
 
+            // Using 15600 samples buffer (975ms) which matches YAMNet-based models (speech_commands)
             audioData = AudioData.create(
                 AudioData.AudioDataFormat.builder()
                     .setNumOfChannels(1)
                     .setSampleRate(16000f)
                     .build(),
-                16000 // 1 second buffer
+                15600
             )
 
-            Log.d("WakeWordEngine", "Engine initialized successfully")
+            _engineState.value = EngineState.READY
+            Log.d("WakeWordEngine", "Engine initialized & READY")
         } catch (e: Exception) {
             Log.e("WakeWordEngine", "Error initializing WakeWordEngine", e)
-            isFallbackEnergyDetector = true
+            _engineState.value = EngineState.ERROR(e.message ?: "Initialization failed")
         }
     }
 
@@ -104,110 +108,141 @@ class WakeWordEngine(private val context: Context) {
             != PackageManager.PERMISSION_GRANTED
         ) {
             Log.e("WakeWordEngine", "Cannot start listening: RECORD_AUDIO permission missing.")
+            _engineState.value = EngineState.MIC_UNAVAILABLE
             return
         }
 
-        if (audioRecord == null) {
+        if (classifier == null || audioData == null) {
             initialize()
         }
 
-        val record = audioRecord ?: run {
-            Log.e("WakeWordEngine", "AudioRecord is null. Cannot start listening.")
+        if (classifier == null) {
+            Log.w("WakeWordEngine", "Cannot start listening: Model is unavailable.")
+            _engineState.value = EngineState.MODEL_UNAVAILABLE
             return
         }
 
-        try {
-            record.startRecording()
-            isListening = true
+        isListening = true
+        _engineState.value = EngineState.LISTENING
+        
 
-            listeningThread = Thread {
-                Log.d("WakeWordEngine", "Wake-word listening thread started")
-                val buffer = ShortArray(8000) // 0.5 sec buffer
+        listeningJob?.cancel()
+        listeningJob = engineScope.launch {
+            Log.d("WakeWordEngine", "Wake-word listening job started via AudioController")
+            
+            val windowBuffer = ShortArray(15600)
+            var bufferPos = 0
 
-                var consecutiveHighVolumeFrames = 0
+            AudioController.wakeWordAudioFlow.collect { chunk ->
+                if (!isListening) return@collect
+                
+                val currentTime = System.currentTimeMillis()
+                val isInCooldown = (currentTime - lastDetectionTime) < cooldownMs
+                
+                if (isInCooldown) {
+                    if (_engineState.value != EngineState.COOLDOWN) {
+                        _engineState.value = EngineState.COOLDOWN
+                    }
+                    return@collect
+                }
 
-                while (isListening) {
-                    val read = record.read(buffer, 0, buffer.size)
-                    if (read > 0) {
-                        if (!isFallbackEnergyDetector && classifier != null) {
-                            try {
-                                audioData?.load(buffer, 0, read)
-                                val result = classifier?.classify(audioData)
-                                val classificationResults = result?.classificationResults()
-                                if (!classificationResults.isNullOrEmpty()) {
-                                    val classifications = classificationResults[0].classifications()
-                                    if (classifications.isNotEmpty()) {
-                                        val categories = classifications[0].categories()
-                                        for (category in categories) {
-                                            val name = category.categoryName().lowercase()
-                                            val score = category.score()
-                                            if ((name.contains("jarvis") || name.contains("hey") || name == "1") && score > 0.4f) {
-                                                Log.d("WakeWordEngine", "WAKE WORD DETECTED! Keyword: $name, Score: $score")
-                                                _wakeWordDetected.tryEmit(Unit)
-                                                try { Thread.sleep(1500) } catch (_: InterruptedException) { break }
-                                                break
-                                            }
-                                        }
+                if (_engineState.value != EngineState.LISTENING) {
+                    _engineState.value = EngineState.LISTENING
+                }
+
+                val copyLength = minOf(chunk.size, windowBuffer.size - bufferPos)
+                System.arraycopy(chunk, 0, windowBuffer, bufferPos, copyLength)
+                bufferPos += copyLength
+
+                if (bufferPos >= 8000) {
+                    try {
+                        audioData?.load(windowBuffer, 0, bufferPos)
+                        bufferPos = 0
+                        
+                        val result = classifier?.classify(audioData)
+                        val classificationResults = result?.classificationResults()
+
+                        if (!classificationResults.isNullOrEmpty()) {
+                            val classifications = classificationResults[0].classifications()
+                            if (classifications.isNotEmpty()) {
+                                val categories = classifications[0].categories()
+                                for (category in categories) {
+                                    val label = category.categoryName().lowercase().trim()
+                                    val score = category.score()
+
+                                    val matchesLabel = targetLabels.any { target ->
+                                        label == target || label.contains(target)
+                                    }
+
+                                    if (matchesLabel && score >= wakeThreshold) {
+                                        Log.d("WakeWordEngine", "WAKE WORD DETECTED! Keyword: '$label', Score: $score")
+                                        lastDetectionTime = System.currentTimeMillis()
+                                        _engineState.value = EngineState.DETECTED
+                                        _wakeWordDetected.tryEmit(Unit)
+                                        return@collect
                                     }
                                 }
-                            } catch (e: Exception) {
-                                Log.e("WakeWordEngine", "Classification error: ${e.message}")
-                            }
-                        } else {
-                            // Voice Energy VAD Fallback
-                            var sumSq = 0.0
-                            for (i in 0 until read) {
-                                sumSq += buffer[i] * buffer[i]
-                            }
-                            val rms = sqrt(sumSq / read)
-                            if (rms > 2500) { // Speech energy threshold
-                                consecutiveHighVolumeFrames++
-                                if (consecutiveHighVolumeFrames >= 2) {
-                                    Log.d("WakeWordEngine", "Voice Activity / Wake Word triggered by energy (RMS: $rms)")
-                                    _wakeWordDetected.tryEmit(Unit)
-                                    consecutiveHighVolumeFrames = 0
-                                    try { Thread.sleep(2000) } catch (_: InterruptedException) { break }
-                                }
-                            } else {
-                                consecutiveHighVolumeFrames = 0
                             }
                         }
-                    } else {
-                        try { Thread.sleep(10) } catch (_: InterruptedException) { break }
+                    } catch (e: Exception) {
+                        Log.e("WakeWordEngine", "Classification processing error: ${e.message}")
                     }
                 }
-                Log.d("WakeWordEngine", "Wake-word listening thread exited")
             }
-            listeningThread?.start()
-        } catch (e: Exception) {
-            Log.e("WakeWordEngine", "Failed to start recording thread", e)
-            isListening = false
         }
     }
 
     fun stopListening() {
         isListening = false
-        try {
-            audioRecord?.stop()
-        } catch (e: Exception) {
-            Log.w("WakeWordEngine", "Error stopping audio record: ${e.message}")
+        _engineState.value = EngineState.STOPPED
+        
+        listeningJob?.cancel()
+        listeningJob = null
+        
+        
+    }
+
+    private fun findAndLoadModelAsset(context: Context): MappedByteBuffer? {
+        val priorityModels = listOf("hey_jarvis.tflite", "speech_commands.tflite")
+        val searchFolders = listOf("", "models", "tflite")
+
+        for (folder in searchFolders) {
+            for (modelName in priorityModels) {
+                val fullPath = if (folder.isEmpty()) modelName else "$folder/$modelName"
+                val buffer = loadModelFile(context, fullPath)
+                if (buffer != null) {
+                    Log.d("WakeWordEngine", "Found and mapped TFLite model at: '$fullPath'")
+                    return buffer
+                }
+            }
         }
-        try {
-            listeningThread?.interrupt()
-            listeningThread?.join(300)
-        } catch (_: Exception) {}
-        listeningThread = null
+        return null
+    }
+
+    private fun loadModelFile(context: Context, modelPath: String): MappedByteBuffer? {
+        return try {
+            val fileDescriptor = context.assets.openFd(modelPath)
+            val inputStream = java.io.FileInputStream(fileDescriptor.fileDescriptor)
+            val fileChannel = inputStream.channel
+            val startOffset = fileDescriptor.startOffset
+            val declaredLength = fileDescriptor.declaredLength
+            val buffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
+            fileDescriptor.close()
+            inputStream.close()
+            buffer
+        } catch (e: Exception) {
+            null
+        }
     }
 
     fun destroy() {
         stopListening()
-        try {
-            audioRecord?.release()
-        } catch (_: Exception) {}
-        audioRecord = null
+        engineScope.cancel()
         try {
             classifier?.close()
         } catch (_: Exception) {}
         classifier = null
+        audioData = null
+        _engineState.value = EngineState.UNINITIALIZED
     }
 }
