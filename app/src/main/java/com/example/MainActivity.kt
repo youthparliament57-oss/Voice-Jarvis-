@@ -89,22 +89,6 @@ fun JarvisApp() {
     }
 }
 
-// Conversation state enum
-enum class AssistantState {
-  IDLE,
-  LISTENING,
-  UNDERSTANDING,
-  SPEAKING
-}
-
-// Data class for chat history
-data class ChatMessage(
-  val id: Int,
-  val text: String,
-  val isUser: Boolean,
-  val isSystemMessage: Boolean = false
-)
-
 @Composable
 fun JarvisScreen(
   modifier: Modifier = Modifier,
