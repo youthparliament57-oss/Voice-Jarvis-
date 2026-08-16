@@ -21,11 +21,7 @@ object PermissionsHelper {
     fun hasUsageStatsPermission(context: Context): Boolean {
         val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
         val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            appOps.unsafeCheckOpNoThrow(
-                AppOpsManager.OPSTR_GET_USAGE_STATS,
-                Process.myUid(),
-                context.packageName
-            )
+            checkOpQ(appOps, context)
         } else {
             @Suppress("DEPRECATION")
             appOps.checkOpNoThrow(
@@ -35,6 +31,15 @@ object PermissionsHelper {
             )
         }
         return mode == AppOpsManager.MODE_ALLOWED
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
+    private fun checkOpQ(appOps: AppOpsManager, context: Context): Int {
+        return appOps.unsafeCheckOpNoThrow(
+            AppOpsManager.OPSTR_GET_USAGE_STATS,
+            Process.myUid(),
+            context.packageName
+        )
     }
 
     fun getUsageStatsPermissionIntent(): Intent {
