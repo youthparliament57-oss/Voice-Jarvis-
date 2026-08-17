@@ -37,8 +37,7 @@ import com.example.gemini.GeminiLiveClient
 import com.example.ui.screens.JarvisOverlay
 import com.example.ui.theme.JarvisTheme
 import com.example.utils.PermissionsHelper
-import com.example.AppState
-import com.example.AssistantStateManager
+
 import com.example.wakeword.WakeWordEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -50,7 +49,24 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
+
+data class TranscriptMessage(val isUser: Boolean, val text: String, val timestamp: Long = System.currentTimeMillis())
+
 object JarvisServiceState {
+    private val _transcript = MutableStateFlow<List<TranscriptMessage>>(emptyList())
+    val transcript = _transcript.asStateFlow()
+
+    fun addTranscript(message: TranscriptMessage) {
+        val current = _transcript.value.toMutableList()
+        current.add(message)
+        if (current.size > 50) current.removeAt(0) // Keep last 50 messages
+        _transcript.value = current
+    }
+
+    fun clearTranscript() {
+        _transcript.value = emptyList()
+    }
+
     private val _isRunning = MutableStateFlow(false)
     val isRunning = _isRunning.asStateFlow()
 
@@ -93,6 +109,7 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
     private val savedStateRegistryController = SavedStateRegistryController.create(this)
 
     private lateinit var wakeWordEngine: WakeWordEngine
+    private val settingsRepository by lazy { SettingsRepository.getInstance(this) }
     private var geminiLiveClient: GeminiLiveClient? = null
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -101,6 +118,14 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
     private var assistantState by mutableStateOf(AssistantState.IDLE)
     private var currentErrorMessage by mutableStateOf<String?>(null)
     private var apiKey: String = ""
+    private val pingReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == "com.example.ACTION_PING_SERVICE") {
+                JarvisServiceState.updateRunning(true)
+            }
+        }
+    }
+
 
     override fun onCreate() {
         super.onCreate()
@@ -111,7 +136,15 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification())
         JarvisServiceState.updateRunning(true)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(pingReceiver, android.content.IntentFilter("com.example.ACTION_PING_SERVICE"), Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(pingReceiver, android.content.IntentFilter("com.example.ACTION_PING_SERVICE"))
+        }
+
         JarvisServiceState.clearError()
+
+
 
         if (PermissionsHelper.hasOverlayPermission(this)) {
             showOverlay()
@@ -133,6 +166,8 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
         if (errorMessage != null) {
             JarvisServiceState.setError(errorMessage)
         }
+        updateNotification(newState)
+
 
         // CONTROL OVERLAY VISIBILITY BASED ON STATE
         // When IDLE: Hide floating overlay view (View.GONE)
@@ -147,7 +182,7 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
     }
 
     private fun initializeDependencies() {
-        val settingsRepository = SettingsRepository(this)
+        
         serviceScope.launch {
             apiKey = settingsRepository.apiKeyFlow.first() ?: ""
             if (apiKey.isEmpty()) {
@@ -156,7 +191,7 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
             }
         }
 
-        wakeWordEngine = WakeWordEngine(this)
+        wakeWordEngine = WakeWordEngine(this, wakeThreshold = settingsRepository.getWakeThreshold())
         wakeWordEngine.initialize()
 
         if (PermissionsHelper.hasAudioPermission(this)) {
@@ -167,12 +202,15 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
             JarvisServiceState.setError(err)
         }
 
+
         serviceScope.launch {
             wakeWordEngine.wakeWordDetected.collect {
+                playWakeWordFeedback()
+
+
                 if (assistantState == AssistantState.IDLE) {
                     if (apiKey.isNotEmpty()) {
                         Log.d("JarvisService", "Wake word heard! Stopping WakeWord listener and starting Gemini Live.")
-                        updateAssistantState(AssistantState.LISTENING)
                         wakeWordEngine.stopListening()
                         delay(200) // Give Android HAL time to release hardware mic
                         startGeminiLiveSession()
@@ -181,6 +219,7 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
                         Log.e("JarvisService", keyErr)
                         Toast.makeText(this@JarvisService, keyErr, Toast.LENGTH_LONG).show()
                         updateAssistantState(AssistantState.ERROR, "Gemini API Key Missing")
+
                         serviceScope.launch {
                             delay(3000)
                             startWakeWordMode()
@@ -191,14 +230,39 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
         }
     }
 
+    private fun playWakeWordFeedback() {
+        try {
+            val vibrator = getSystemService(android.content.Context.VIBRATOR_SERVICE) as android.os.Vibrator
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                vibrator.vibrate(android.os.VibrationEffect.createOneShot(100, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(100)
+            }
+                    serviceScope.launch {
+            var toneGen: android.media.ToneGenerator? = null
+            try {
+                toneGen = android.media.ToneGenerator(android.media.AudioManager.STREAM_MUSIC, 100)
+                toneGen.startTone(android.media.ToneGenerator.TONE_PROP_BEEP, 150)
+                delay(200)
+            } finally {
+                toneGen?.release()
+            }
+        }
+        } catch (e: Exception) {
+            Log.e("JarvisService", "Feedback error", e)
+        }
+    }
+
     private fun startWakeWordMode() {
-        AssistantStateManager.updateState(AppState.WAKE_LISTENING)
+        
         updateAssistantState(AssistantState.IDLE)
         geminiLiveClient?.disconnect()
         geminiLiveClient = null
         sessionTimeoutJob?.cancel()
 
         if (PermissionsHelper.hasAudioPermission(this)) {
+
             serviceScope.launch {
                 delay(200)
                 wakeWordEngine.startListening()
@@ -209,7 +273,7 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
     }
 
     private fun startGeminiLiveSession() {
-        AssistantStateManager.updateState(AppState.ACTIVE_CONVERSATION)
+        
         if (geminiLiveClient != null) return
 
         if (!PermissionsHelper.hasAudioPermission(this)) {
@@ -219,7 +283,10 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
             return
         }
 
-        geminiLiveClient = GeminiLiveClient(this, apiKey)
+        geminiLiveClient = GeminiLiveClient(context = this, apiKey = apiKey, modelName = settingsRepository.getModelName(), systemInstruction = settingsRepository.getSystemPrompt()) // 
+
+
+
 
         serviceScope.launch {
             geminiLiveClient?.stateFlow?.collect { state ->
@@ -245,6 +312,7 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
                     is GeminiLiveClient.LiveState.ERROR -> {
                         val errMsg = state.message.ifBlank { "Voice Connection Error (Check API Key / Network)" }
                         updateAssistantState(AssistantState.ERROR, errMsg)
+
                         serviceScope.launch {
                             delay(3500)
                             startWakeWordMode()
@@ -257,22 +325,64 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
             }
         }
 
+        
+        serviceScope.launch {
+            com.example.audio.AudioController.userSpeakingFlow.collect { isSpeaking ->
+                if (isSpeaking && assistantState == AssistantState.SPEAKING) {
+                    android.util.Log.d("JarvisService", "Local VAD Barge-in detected. Flushing playback.")
+                    geminiLiveClient?.flushPlayback()
+                    updateAssistantState(AssistantState.LISTENING)
+                }
+            }
+        }
+        
         geminiLiveClient?.connect()
+
         resetSessionTimer()
     }
 
     private fun resetSessionTimer() {
         sessionTimeoutJob?.cancel()
         sessionTimeoutJob = serviceScope.launch {
-            delay(SESSION_TIMEOUT_MS)
+            delay(settingsRepository.getSessionTimeout())
             Log.d("JarvisService", "Session timed out due to inactivity. Returning to Wake Word listening.")
             startWakeWordMode()
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == "com.example.ACTION_SEND_TEXT") {
+            val text = intent.getStringExtra("TEXT_QUERY")
+            if (!text.isNullOrBlank()) {
+                sendTextQuery(text)
+            }
+        }
         return START_STICKY
     }
+
+
+    private fun sendTextQuery(text: String) {
+        JarvisServiceState.addTranscript(TranscriptMessage(isUser = true, text = text))
+        if (assistantState == AssistantState.IDLE) {
+
+            // Wake up JARVIS first if sleeping
+            serviceScope.launch {
+                val apiKey = settingsRepository.getApiKey()
+                if (!apiKey.isNullOrBlank()) {
+                    playWakeWordFeedback()
+                    startGeminiLiveSession()
+                    delay(500) // Brief delay to let WebSocket connect
+                    geminiLiveClient?.sendText(text)
+                } else {
+                    JarvisServiceState.setError("API Key Missing")
+                }
+            }
+        } else {
+            // Already connected
+            geminiLiveClient?.sendText(text)
+        }
+    }
+
 
     override fun onBind(intent: Intent?): IBinder? {
         return null
@@ -314,6 +424,8 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
                             state = assistantState,
                             errorMessage = currentErrorMessage,
                             onDismiss = {
+                                currentErrorMessage = null
+                                JarvisServiceState.setError(null)
                                 startWakeWordMode()
                             }
                         )
@@ -331,13 +443,15 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
 
     override fun onDestroy() {
         super.onDestroy()
+        com.example.audio.AudioController.destroy()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
         store.clear()
 
+        try { unregisterReceiver(pingReceiver) } catch (e: Exception) {}
         JarvisServiceState.updateRunning(false)
-        AssistantStateManager.updateState(AppState.IDLE)
+        
         JarvisServiceState.updateState(AssistantState.IDLE)
 
         wakeWordEngine.destroy()
@@ -364,10 +478,29 @@ class JarvisService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedState
         }
     }
 
+    
+    private fun updateNotification(state: AssistantState) {
+        val text = when (state) {
+            AssistantState.IDLE -> "Listening for wake word..."
+            AssistantState.LISTENING -> "JARVIS is listening..."
+            AssistantState.UNDERSTANDING -> "JARVIS is thinking..."
+            AssistantState.SPEAKING -> "JARVIS is speaking..."
+            AssistantState.ERROR -> "JARVIS encountered an error."
+        }
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("JARVIS Voice Assistant")
+            .setContentText(text)
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setOngoing(true)
+            .build()
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(NOTIFICATION_ID, notification)
+    }
+
     private fun createNotification(): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("JARVIS AI Agent Active")
-            .setContentText("Listening for wake word 'Hey Jarvis'...")
+            .setContentText("Listening for wake word ('yes'/'go')...")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)

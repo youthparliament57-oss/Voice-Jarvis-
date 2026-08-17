@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -106,9 +108,11 @@ fun JarvisOverlay(
                         ),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = if (state == AssistantState.ERROR) "⚠️" else "👽",
-                        fontSize = 22.sp
+                    Icon(
+                        imageVector = if (state == AssistantState.ERROR) Icons.Default.Warning else Icons.Default.SmartToy,
+                        contentDescription = null,
+                        tint = OledBlack,
+                        modifier = Modifier.size(24.dp)
                     )
                 }
             }

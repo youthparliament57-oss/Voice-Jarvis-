@@ -1,0 +1,1 @@
+sed -i 's/geminiLiveClient = GeminiLiveClient(context = this, apiKey = apiKey, systemInstruction = settingsRepository.getSystemPrompt())/geminiLiveClient = GeminiLiveClient(context = this, apiKey = apiKey, modelName = settingsRepository.getModelName(), systemInstruction = settingsRepository.getSystemPrompt())/g' app/src/main/java/com/example/services/JarvisService.kt

@@ -57,13 +57,11 @@ fun PermissionsScreen(
     var hasMicPermission by remember { mutableStateOf(PermissionsHelper.hasAudioPermission(context)) }
     var hasOverlayPermission by remember { mutableStateOf(PermissionsHelper.hasOverlayPermission(context)) }
     var hasNotificationPermission by remember { mutableStateOf(PermissionsHelper.hasNotificationPermission(context)) }
-    var hasContactsPermission by remember { mutableStateOf(PermissionsHelper.hasContactsPermission(context)) }
 
     fun refreshPermissions() {
         val newMic = PermissionsHelper.hasAudioPermission(context)
         val newOverlay = PermissionsHelper.hasOverlayPermission(context)
         val newNotif = PermissionsHelper.hasNotificationPermission(context)
-        val newContacts = PermissionsHelper.hasContactsPermission(context)
 
         if (!hasMicPermission && newMic) {
             Toast.makeText(context, "Microphone Permission Granted!", Toast.LENGTH_SHORT).show()
@@ -75,7 +73,6 @@ fun PermissionsScreen(
         hasMicPermission = newMic
         hasOverlayPermission = newOverlay
         hasNotificationPermission = newNotif
-        hasContactsPermission = newContacts
     }
 
     DisposableEffect(lifecycleOwner) {
@@ -109,12 +106,6 @@ fun PermissionsScreen(
         refreshPermissions()
     }
 
-    val contactsLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        hasContactsPermission = isGranted
-        refreshPermissions()
-    }
 
     val overlayLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -199,7 +190,7 @@ fun PermissionsScreen(
                         PermissionCard(
                             icon = Icons.Default.Mic,
                             title = "Microphone Access",
-                            description = "Required for continuous 'Hey Jarvis' wake word audio sampling.",
+                            description = "Required for continuous 'yes'/'go' wake word audio sampling.",
                             isGranted = hasMicPermission,
                             isRequired = true,
                             onRequest = { micLauncher.launch(Manifest.permission.RECORD_AUDIO) }
@@ -236,19 +227,6 @@ fun PermissionsScreen(
                         }
                     }
 
-                    // 4. Contacts Access
-                    item {
-                        PermissionCard(
-                            icon = Icons.Default.People,
-                            title = "Contacts Access",
-                            description = "Optional. Enables voice calling and contact lookup commands.",
-                            isGranted = hasContactsPermission,
-                            isRequired = false,
-                            onRequest = {
-                                contactsLauncher.launch(Manifest.permission.READ_CONTACTS)
-                            }
-                        )
-                    }
                 }
             }
 
@@ -262,13 +240,15 @@ fun PermissionsScreen(
                     onClick = {
                         if (allCoreGranted) {
                             onAllPermissionsGranted()
+
+                            
                         } else {
                             Toast.makeText(
                                 context,
                                 "Microphone & Overlay permissions are recommended for full background operation.",
                                 Toast.LENGTH_LONG
                             ).show()
-                            onAllPermissionsGranted()
+                            
                         }
                     },
                     modifier = Modifier
@@ -287,21 +267,6 @@ fun PermissionsScreen(
                     )
                 }
 
-                OutlinedButton(
-                    onClick = onSkip,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp),
-                    shape = RoundedCornerShape(14.dp),
-                    border = BorderStroke(1.dp, SurfaceBorderHighlight)
-                ) {
-                    Text(
-                        text = "SKIP FOR NOW",
-                        fontWeight = FontWeight.Bold,
-                        color = SilverText,
-                        letterSpacing = 1.sp
-                    )
-                }
             }
         }
     }

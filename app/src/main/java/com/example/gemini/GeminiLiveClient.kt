@@ -41,12 +41,14 @@ interface GeminiLiveListener {
     fun onStateChanged(state: GeminiLiveClient.LiveState)
     fun onError(message: String)
     fun onModelSpoke(pcmData: ByteArray)
+    fun onModelText(text: String)
 }
 
 class GeminiLiveClient(
     private val context: Context,
     private val apiKey: String,
-    private val modelName: String = "models/gemini-3.1-flash-live-preview",
+    private val modelName: String = "models/gemini-2.5-flash",
+    private val systemInstruction: String = "You are JARVIS, a highly advanced, witty AI assistant. Keep responses brief and conversational.",
     private val listener: GeminiLiveListener? = null
 ) {
     sealed class LiveState {
@@ -75,6 +77,7 @@ class GeminiLiveClient(
     private var audioRecordJob: Job? = null
 
     private var audioTrack: AudioTrack? = null
+    private var tts: android.speech.tts.TextToSpeech? = null
 
     @Volatile
     private var isRecording = false
@@ -89,6 +92,15 @@ class GeminiLiveClient(
         capacity = 64,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
+
+
+    init {
+        tts = android.speech.tts.TextToSpeech(context) { status ->
+            if (status == android.speech.tts.TextToSpeech.SUCCESS) {
+                tts?.language = java.util.Locale.US
+            }
+        }
+    }
 
     private val _stateFlow = MutableStateFlow<LiveState>(LiveState.IDLE)
     val stateFlow: StateFlow<LiveState> = _stateFlow.asStateFlow()
@@ -113,8 +125,8 @@ class GeminiLiveClient(
         isClosedManually.set(false)
         updateState(LiveState.CONNECTING)
 
-        val url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=$apiKey"
-        val request = Request.Builder().url(url).build()
+        val url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+        val request = Request.Builder().url(url).addHeader("x-goog-api-key", apiKey).build()
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -150,7 +162,7 @@ class GeminiLiveClient(
                 if (!isClosedManually.get()) {
                     triggerReconnect(t.message ?: "Network error")
                 } else {
-                    updateState(LiveState.ERROR(t.message ?: "Connection failed"))
+                    updateState(LiveState.DISCONNECTED)
                 }
             }
         })
@@ -185,7 +197,7 @@ class GeminiLiveClient(
                     put("systemInstruction", JSONObject().apply {
                         put("parts", JSONArray().apply {
                             put(JSONObject().apply {
-                                put("text", "You are JARVIS, a highly advanced, witty AI assistant. Keep responses brief and conversational.")
+                                put("text", systemInstruction)
                             })
                         })
                     })
@@ -233,8 +245,18 @@ class GeminiLiveClient(
                     val parts = modelTurn.getJSONArray("parts")
                     for (i in 0 until parts.length()) {
                         val part = parts.getJSONObject(i)
+
+                        if (part.has("text")) {
+                            val textContent = part.getString("text")
+                            Log.d("GeminiLiveClient", "Model Text Response: $textContent")
+                            listener?.onModelText(textContent)
+                            updateState(LiveState.SPEAKING)
+                            tts?.speak(textContent, android.speech.tts.TextToSpeech.QUEUE_ADD, null, null)
+                        }
+
                         if (part.has("inlineData")) {
                             val inlineData = part.getJSONObject("inlineData")
+
                             if (inlineData.getString("mimeType").startsWith("audio/pcm")) {
                                 val dataBase64 = inlineData.getString("data")
                                 val pcmData = Base64.decode(dataBase64, Base64.NO_WRAP)
@@ -338,7 +360,7 @@ class GeminiLiveClient(
         
         Log.d("GeminiLiveClient", "Started recording via AudioController")
 
-        var consecutiveSendFailures = 0
+        val consecutiveSendFailures = java.util.concurrent.atomic.AtomicInteger(0)
 
         audioRecordJob?.cancel()
         audioRecordJob = clientScope.launch {
@@ -364,14 +386,14 @@ class GeminiLiveClient(
 
                 val sent = webSocket?.send(json.toString()) ?: false
                 if (!sent) {
-                    consecutiveSendFailures++
-                    if (consecutiveSendFailures > 5) {
+                    consecutiveSendFailures.incrementAndGet()
+                    if (consecutiveSendFailures.get() > 5) {
                         Log.e("GeminiLiveClient", "WebSocket send failed repeatedly. Triggering reconnect.")
                         triggerReconnect("WebSocket streaming failed")
                         return@collect
                     }
                 } else {
-                    consecutiveSendFailures = 0
+                    consecutiveSendFailures.set(0)
                 }
             }
         }
@@ -390,11 +412,37 @@ class GeminiLiveClient(
         
         
 
-        try {
-            audioTrack?.stop()
-            audioTrack?.release()
-        } catch (_: Exception) {}
+        val trackToRelease = audioTrack
         audioTrack = null
+        
+        if (trackToRelease != null) {
+            clientScope.launch {
+                try {
+                    
+                    trackToRelease.pause()
+                    trackToRelease.flush()
+                    trackToRelease.stop()
+                    trackToRelease.release()
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    fun flushPlayback() {
+        clientScope.launch {
+            var cleared = 0
+            while (audioPlaybackChannel.tryReceive().isSuccess) { cleared++ }
+            try {
+                val state = audioTrack?.playState
+                if (state == AudioTrack.PLAYSTATE_PLAYING || state == AudioTrack.PLAYSTATE_PAUSED) {
+                    audioTrack?.pause()
+                    audioTrack?.flush()
+                    audioTrack?.play()
+                }
+            } catch (e: Exception) {
+                Log.w("GeminiLiveClient", "Error flushing audioTrack manually: ${e.message}")
+            }
+        }
     }
 
     fun disconnect() {
@@ -404,14 +452,55 @@ class GeminiLiveClient(
 
         try {
             webSocket?.close(1000, "User requested disconnect")
-        } catch (_: Exception) {}
+        }
+
+ catch (_: Exception) {}
         webSocket = null
 
         updateState(LiveState.DISCONNECTED)
     }
 
+
+    fun sendText(text: String) {
+        clientScope.launch {
+            if (webSocket == null) {
+                Log.w("GeminiLiveClient", "Cannot send text, webSocket is null")
+                return@launch
+            }
+            try {
+                val json = org.json.JSONObject().apply {
+                    put("clientContent", org.json.JSONObject().apply {
+                        put("turns", org.json.JSONArray().apply {
+                            put(org.json.JSONObject().apply {
+                                put("role", "user")
+                                put("parts", org.json.JSONArray().apply {
+                                    put(org.json.JSONObject().apply {
+                                        put("text", text)
+                                    })
+                                })
+                            })
+                        })
+                        put("turnComplete", true)
+                    })
+                }
+                val sent = webSocket?.send(json.toString()) ?: false
+                if (sent) {
+                    Log.d("GeminiLiveClient", "Sent text query successfully: $text")
+                    updateState(LiveState.SPEAKING) // Transition state if needed
+                } else {
+                    Log.w("GeminiLiveClient", "Failed to send text via WebSocket")
+                }
+            } catch (e: Exception) {
+                Log.e("GeminiLiveClient", "Error sending text", e)
+            }
+        }
+    }
+
     fun destroy() {
         disconnect()
+        tts?.stop()
+        tts?.shutdown()
+        tts = null
         clientJob.cancel()
     }
 }

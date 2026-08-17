@@ -29,6 +29,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -55,20 +57,31 @@ fun SettingsScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val repository = remember { SettingsRepository(context) }
+    val repository = remember { SettingsRepository.getInstance(context) }
     val viewModel: SettingsViewModel = viewModel(factory = SettingsViewModel.Factory(repository))
     
     val apiKey by viewModel.apiKey.collectAsStateWithLifecycle()
     val validationState by viewModel.validationState.collectAsStateWithLifecycle()
     val saveStatus by viewModel.saveStatus.collectAsStateWithLifecycle()
 
+
     var inputKey by remember { mutableStateOf("") }
+    val systemPrompt by viewModel.systemPrompt.collectAsStateWithLifecycle()
+    val modelName by viewModel.modelName.collectAsStateWithLifecycle()
+    val wakeThreshold by viewModel.wakeThreshold.collectAsStateWithLifecycle()
+    val sessionTimeout by viewModel.sessionTimeout.collectAsStateWithLifecycle()
+
+    var inputSystemPrompt by remember(systemPrompt) { mutableStateOf(systemPrompt) }
+    var inputModelName by remember(modelName) { mutableStateOf(modelName) }
+    var inputWakeThreshold by remember(wakeThreshold) { mutableStateOf(wakeThreshold.toString()) }
+    var inputSessionTimeout by remember(sessionTimeout) { mutableStateOf((sessionTimeout / 1000).toString()) }
+
     var passwordVisible by remember { mutableStateOf(false) }
 
     val hasMic = PermissionsHelper.hasAudioPermission(context)
     val hasOverlay = PermissionsHelper.hasOverlayPermission(context)
     val hasNotif = PermissionsHelper.hasNotificationPermission(context)
-    val permissionsGrantedCount = (if (hasMic) 1 else 0) + (if (hasOverlay) 1 else 0) + (if (hasNotif) 1 else 0)
+    val coreGranted = hasMic && hasOverlay
 
     LaunchedEffect(apiKey) {
         inputKey = apiKey
@@ -259,7 +272,91 @@ fun SettingsScreen(
                     Text("SAVE KEY", fontWeight = FontWeight.Black, letterSpacing = 0.5.sp)
                 }
             }
-
+            Spacer(modifier = Modifier.height(16.dp))
+            OutlinedTextField(
+                value = inputSystemPrompt,
+                onValueChange = { inputSystemPrompt = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("System Prompt") },
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = PureWhite,
+                    unfocusedBorderColor = SurfaceBorder,
+                    focusedLabelColor = PureWhite,
+                    unfocusedLabelColor = SilverText,
+                    cursorColor = PureWhite,
+                    focusedTextColor = PureWhite,
+                    unfocusedTextColor = PureWhite
+                )
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedTextField(
+                value = inputModelName,
+                onValueChange = { inputModelName = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Model Name (e.g. models/gemini-2.5-flash)") },
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = PureWhite,
+                    unfocusedBorderColor = SurfaceBorder,
+                    focusedLabelColor = PureWhite,
+                    unfocusedLabelColor = SilverText,
+                    cursorColor = PureWhite,
+                    focusedTextColor = PureWhite,
+                    unfocusedTextColor = PureWhite
+                )
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = inputWakeThreshold,
+                    onValueChange = { inputWakeThreshold = it },
+                    modifier = Modifier.weight(1f),
+                    label = { Text("Wake Threshold (0.0-1.0)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = PureWhite,
+                        unfocusedBorderColor = SurfaceBorder,
+                        focusedLabelColor = PureWhite,
+                        unfocusedLabelColor = SilverText,
+                        cursorColor = PureWhite,
+                        focusedTextColor = PureWhite,
+                        unfocusedTextColor = PureWhite
+                    )
+                )
+                OutlinedTextField(
+                    value = inputSessionTimeout,
+                    onValueChange = { inputSessionTimeout = it },
+                    modifier = Modifier.weight(1f),
+                    label = { Text("Timeout (sec)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = PureWhite,
+                        unfocusedBorderColor = SurfaceBorder,
+                        focusedLabelColor = PureWhite,
+                        unfocusedLabelColor = SilverText,
+                        cursorColor = PureWhite,
+                        focusedTextColor = PureWhite,
+                        unfocusedTextColor = PureWhite
+                    )
+                )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            Button(
+                onClick = {
+                    viewModel.saveSystemPrompt(inputSystemPrompt)
+                    viewModel.saveModelName(inputModelName)
+                    inputWakeThreshold.toFloatOrNull()?.let { viewModel.saveWakeThreshold(it) }
+                    inputSessionTimeout.toLongOrNull()?.let { viewModel.saveSessionTimeout(it * 1000) }
+                },
+                modifier = Modifier.fillMaxWidth().height(50.dp),
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = DarkCardSurface,
+                    contentColor = PureWhite
+                )
+            ) {
+                Text("SAVE ADDITIONAL SETTINGS", fontWeight = FontWeight.Black, letterSpacing = 0.5.sp)
+            }
+            
             when (val state = validationState) {
                 is ValidationState.Success -> {
                     Spacer(modifier = Modifier.height(16.dp))
@@ -387,7 +484,7 @@ fun SettingsScreen(
                             color = PureWhite
                         )
                         Text(
-                            text = "$permissionsGrantedCount of 3 permissions granted (Microphone, Overlay, Notifications)",
+                            text = if (coreGranted) "Core system permissions granted" else "Missing required core permissions",
                             style = MaterialTheme.typography.bodySmall,
                             color = SilverText
                         )

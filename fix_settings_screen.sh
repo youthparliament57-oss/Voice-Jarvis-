@@ -1,0 +1,2 @@
+sed -i 's/val permissionsGrantedCount = (if (hasMic) 1 else 0) + (if (hasOverlay) 1 else 0) + (if (hasNotif) 1 else 0)/val coreGranted = hasMic \&\& hasOverlay/g' app/src/main/java/com/example/ui/screens/SettingsScreen.kt
+sed -i 's/text = "$permissionsGrantedCount of 3 permissions granted (Microphone, Overlay, Notifications)",/text = if (coreGranted) "Core system permissions granted" else "Missing required core permissions",/g' app/src/main/java/com/example/ui/screens/SettingsScreen.kt

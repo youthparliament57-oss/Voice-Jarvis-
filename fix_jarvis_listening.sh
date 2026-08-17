@@ -1,0 +1,1 @@
+sed -i 's/is GeminiLiveClient.LiveState.LISTENING -> {/is GeminiLiveClient.LiveState.LISTENING -> {\n                        updateAssistantState(AssistantState.LISTENING)/g' app/src/main/java/com/example/services/JarvisService.kt

@@ -1,0 +1,2 @@
+sed -i 's/private val listener: GeminiLiveListener? = null/private val systemInstruction: String = "You are JARVIS, a highly advanced, witty AI assistant. Keep responses brief and conversational.",\n    private val listener: GeminiLiveListener? = null/g' app/src/main/java/com/example/gemini/GeminiLiveClient.kt
+sed -i 's/put("text", "You are JARVIS, a highly advanced, witty AI assistant. Keep responses brief and conversational.")/put("text", systemInstruction)/g' app/src/main/java/com/example/gemini/GeminiLiveClient.kt

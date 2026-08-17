@@ -1,0 +1,2 @@
+sed -i 's/val url = "wss:\/\/generativelanguage.googleapis.com\/ws\/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=$apiKey"/val url = "wss:\/\/generativelanguage.googleapis.com\/ws\/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"/g' app/src/main/java/com/example/gemini/GeminiLiveClient.kt
+sed -i 's/val request = Request.Builder().url(url).build()/val request = Request.Builder().url(url).addHeader("x-goog-api-key", apiKey).build()/g' app/src/main/java/com/example/gemini/GeminiLiveClient.kt

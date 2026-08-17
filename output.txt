@@ -1,0 +1,240 @@
+Voice JARVIS - Bug Analysis Report
+
+Page 1
+
+Chapter 1: Executive Summary
+This report presents a comprehensive audit of the Voice JARVIS Android application, a voice-activated AI
+assistant designed to operate as a foreground service with a floating overlay HUD. The project follows a
+three-pillar architecture plan: (1) a local wake-word detection system, (2) a continuous voice conversation
+system powered by Google Gemini Live API via WebSocket, and (3) a proactive intelligence system that
+learns user habits. After a thorough line-by-line analysis of every source file, asset, build configuration, and
+architectural document, this report identifies a total of 41 distinct issues spanning critical failures, functional
+bugs, fake or misleading claims, stub code, hardcoded values, missing implementations, and architectural
+gaps.
+The most severe finding is that the wake-word system, which is the core activation mechanism for the entire
+application, is fundamentally non-functional. The project claims to use a custom "Hey Jarvis" TFLite model,
+but the actual asset included is a generic speech commands model (speech_commands.tflite) that does not
+contain any "jarvis" labels. This means the wake word will never trigger, rendering the primary user
+interaction path completely broken. Additionally, the entire third pillar (Proactive Intelligence System)
+including Room database, WorkManager scheduling, and UsageStatsManager integration is entirely missing
+from the codebase despite being prominently featured in the project plan.
+The voice conversation system (Gemini Live WebSocket client) is the most functional component and
+demonstrates good engineering practices including reconnection logic with exponential backoff, audio
+buffering with bounded channels, and proper state management. However, it lacks critical features specified
+in the plan such as Acoustic Echo Cancellation (AEC) and Voice Activity Detection (VAD), and has several
+concurrency and resource management bugs. The report below provides a detailed breakdown of every issue
+found, categorized by severity, along with specific code-level fix recommendations.
+
+Severity
+
+Count
+
+Categories
+
+CRITICAL
+
+5
+
+Wake-word model mismatch, fake documentation, state desync, entire Pillar 3 missing
+
+HIGH
+
+12
+
+Resource leaks, race conditions, AEC/VAD missing, thread safety, audio drop, API key exposure,
+state bugs
+
+MEDIUM
+
+16
+
+Hardcoded values, dead code, unused deps, empty ProGuard, no minification, lint disabled,
+misleading UI
+
+LOW
+
+8
+
+Unused data class, stub tests, empty directories, emoji in UI, permission UX, version issues
+
+Chapter 2: Wake Word System Analysis
+The wake word system is the primary activation mechanism for the JARVIS assistant. It is designed to run
+continuously in a foreground service, listening for the phrase "Hey Jarvis" using a local TensorFlow Lite audio
+classification model. This chapter examines the WakeWordEngine, AudioController, and their integration
+
+Voice JARVIS - Bug Analysis Report
+
+Page 2
+
+within the JarvisService to determine whether the system is properly implemented and correctly wired
+together.
+
+2.1 Architecture and Wiring Overview
+The wake word system follows a multi-layer audio pipeline. The AudioController (a Kotlin singleton object)
+manages the Android AudioRecord instance and captures raw PCM audio in 1024-sample chunks at 16kHz
+mono. These chunks are emitted through a MutableSharedFlow called wakeWordAudioFlow. The
+WakeWordEngine collects these chunks into a window buffer and, once the buffer reaches 8000 samples,
+feeds the accumulated data into a MediaPipe AudioClassifier for inference. When a classification result
+matches one of the target labels ("hey_jarvis", "jarvis", or "hey jarvis") with a confidence score at or above
+0.50, the engine emits a signal through a SharedFlow called wakeWordDetected. The JarvisService collects
+this signal and transitions from IDLE to LISTENING state, then stops the wake word engine and initiates a
+Gemini Live WebSocket session.
+The wiring between these components is generally correct in terms of coroutine flow connections. The
+AudioController.init()
+
+is
+
+called
+
+in
+
+JarvisService.onCreate(),
+
+which
+
+starts
+
+observing
+
+the
+
+AssistantStateManager.appState flow to automatically start and stop recording. The state transitions from
+WAKE_LISTENING to ACTIVE_CONVERSATION correctly route audio chunks to either the wake word
+flow or the Gemini audio flow. However, despite this seemingly sound architecture, the system has a
+fundamental flaw that renders it completely non-functional, as detailed in the next section.
+
+2.2 Critical: Wrong / Missing TFLite Model (BUG-01)
+CRITICAL
+
+The most critical issue in the entire project is that the wake word detection system uses the wrong model. The
+project documentation (whathavedone.md) explicitly claims: "Successfully researched and integrated an
+authentic Hey Jarvis Wake Word model from the open-source microWakeWord project" and "Exchanged the
+generic placeholder model with a targeted local model (hey_jarvis.tflite)." However, inspecting the actual
+assets directory reveals that no file named hey_jarvis.tflite exists. The only TFLite model present is
+speech_commands.tflite (3.6 MB), which is the generic Google YAMNet-based speech commands classifier
+trained to recognize 35+ keywords including "yes", "no", "up", "down", etc. It does NOT include any label for
+"hey_jarvis", "jarvis", or "hey jarvis".
+The WakeWordEngine.findAndLoadModelAsset() method searches for models in priority order: first looking
+for "hey_jarvis.tflite", then "speech_commands.tflite" across three directories (root, models/, tflite/). Since
+hey_jarvis.tflite does not exist, it falls back to speech_commands.tflite. The classification results from this
+model will contain labels like "_silence_", "_unknown_", "yes", "no", etc. The target labels defined in
+WakeWordEngine ("hey_jarvis", "jarvis", "hey jarvis") will never match any label in the model output,
+meaning the wake word will NEVER be detected regardless of what the user says.
+
+Fix Recommendation
+
+Voice JARVIS - Bug Analysis Report
+
+Page 3
+
+Two options exist: (A) Train a custom TFLite audio classification model specifically for "Hey Jarvis" using
+transfer learning on the YAMNet architecture, and place it in the assets folder as hey_jarvis.tflite. Tools like
+Google Teachable Machine or the TensorFlow Lite Model Maker can accomplish this with a custom dataset
+of "Hey Jarvis" utterances. (B) Alternatively, modify the target labels in WakeWordEngine to match labels
+that actually exist in the speech_commands.tflite model (such as "yes" or "go") as a temporary workaround,
+and update the UI prompts accordingly.
+
+2.3 Fake Documentation Claim (BUG-02)
+CRITICAL
+
+The whathavedone.md file contains a demonstrably false claim under Step 4 (The Wake Word Engine). It
+states: "Successfully researched and integrated an authentic Hey Jarvis Wake Word model from the
+open-source microWakeWord project" and "Exchanged the generic placeholder model with a targeted local
+model (hey_jarvis.tflite), ensuring offline operation." Neither statement is true. The microWakeWord project
+may exist as an open-source effort, but its output model was never actually added to this project. The file
+hey_jarvis.tflite has never existed in this codebase. This is not a minor documentation oversight; it represents
+a fabricated implementation claim that would mislead any developer reviewing the project history or assessing
+completion status.
+
+Fix Recommendation
+Update whathavedone.md to accurately reflect the current state: the project uses the generic
+speech_commands.tflite model as a placeholder. Either train and integrate the actual Hey Jarvis model, or
+clearly document that the wake-word model is a TODO item that requires a custom training pipeline.
+
+2.4 Label Mismatch: Space vs Underscore (BUG-03)
+HIGH
+
+Even if a correct model were provided, the targetLabels set in WakeWordEngine contains a label with a space
+character: "hey jarvis" (line 25). MediaPipe AudioClassifier models based on YAMNet use underscored
+labels (e.g., "hey_jarvis") without spaces. The classification result processing code lowercases and trims the
+label, but the space in "hey jarvis" would need to match a model output label that contains a space, which is
+extremely unlikely with standard YAMNet models. This means even if the model output contained "hey
+jarvis", the contains() check might still work, but it represents an inconsistency that could cause silent failures
+with different model formats.
+
+Fix Recommendation
+Remove "hey jarvis" (with space) from targetLabels and keep only the underscored variants: "hey_jarvis" and
+"jarvis". Alternatively, normalize both the model output labels and the target labels by replacing spaces with
+underscores before comparison.
+
+2.5 Audio Buffer Size Mismatch (BUG-04)
+
+Voice JARVIS - Bug Analysis Report
+
+Page 4
+
+MEDIUM
+
+The AudioData object is created with a buffer size of 15600 samples (975ms at 16kHz), but the classification
+is triggered when bufferPos reaches only 8000 samples (500ms). This means only 51% of the allocated buffer
+is ever used before it is reset to zero. The comment on line 87 states this matches YAMNet-based models
+which expect 975ms windows, but the actual classification happens at 500ms, which is below the expected
+input size for YAMNet. This could result in degraded classification accuracy or the model rejecting the input
+entirely, depending on how MediaPipe handles underfilled buffers.
+
+Fix Recommendation
+Change the classification trigger threshold from 8000 to 15600 to match the AudioData buffer size and the
+expected YAMNet input window. This ensures the model receives a full 975ms audio window for each
+classification, which is the standard operating range for YAMNet-based models.
+
+2.6 Resource Leak in loadModelFile (BUG-05)
+HIGH
+
+The
+
+loadModelFile()
+
+method
+
+in
+
+WakeWordEngine
+
+opens
+
+three
+
+resources:
+
+AssetFileDescriptor,
+
+FileInputStream, and FileChannel. On the success path, only fileDescriptor.close() and inputStream.close()
+are called. The FileChannel object obtained via inputStream.channel is never explicitly closed. While closing
+the FileInputStream may eventually close the underlying channel, this is implementation-dependent and not
+guaranteed by the Android API. On the exception path, none of these resources are closed at all (the catch
+block simply returns null), which means a failed model load attempt leaks file descriptors.
+
+Fix Recommendation
+Use a try-with-resources pattern or Kotlin use{} blocks to ensure all three resources (AssetFileDescriptor,
+FileInputStream, FileChannel) are properly closed in both success and exception paths. The current pattern of
+manually calling close() on only some resources is error-prone and should be replaced.
+
+2.7 Missing Haptic and Audio Feedback (BUG-06)
+MEDIUM
+
+The project plan (Pillar 1, Step 4) explicitly specifies: "Play a subtle futuristic sound and trigger a haptic pulse
+to notify the user that JARVIS is listening." Neither of these feedback mechanisms is implemented anywhere
+in the codebase. When the wake word is detected, the only user-visible change is the overlay appearing on
+screen. There is no Vibrator service call for haptic feedback, and no MediaPlayer or SoundPool call for audio
+feedback. This is a significant UX gap because the user has no confirmation that the wake word was heard
+unless they happen to be looking at the screen.
+
+Fix Recommendation
+In the wakeWordDetected collector within JarvisService.initializeDependencies(), add a call to the Android
+Vibrator service to produce a short haptic pulse (e.g., 50ms). Additionally, load a short notification sound
+
+Voice JARVIS - Bug Analysis Report
+
+Page 5
+
+

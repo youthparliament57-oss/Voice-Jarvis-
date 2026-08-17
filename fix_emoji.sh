@@ -1,0 +1,2 @@
+sed -i 's/import androidx.compose.material.icons.Icons/import androidx.compose.material.icons.Icons\nimport androidx.compose.material.icons.filled.Warning\nimport androidx.compose.material.icons.filled.SmartToy/g' app/src/main/java/com/example/ui/screens/JarvisOverlay.kt
+sed -i 's/Text(/Icon(imageVector = if (state == AssistantState.ERROR) Icons.Default.Warning else Icons.Default.SmartToy, contentDescription = null, tint = OledBlack, modifier = Modifier.size(24.dp) ) \/\/ Text(/g' app/src/main/java/com/example/ui/screens/JarvisOverlay.kt

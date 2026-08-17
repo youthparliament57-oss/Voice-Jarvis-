@@ -22,7 +22,8 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -36,8 +37,8 @@ android {
     }
 
     lint {
-        abortOnError = false
-        checkReleaseBuilds = false
+        abortOnError = true
+        checkReleaseBuilds = true
     }
 
     buildFeatures {
@@ -63,7 +64,6 @@ dependencies {
     implementation(libs.androidx.compose.material.icons.extended)
     
     // Accompanist Permissions
-    implementation(libs.accompanist.permissions)
     
     // Security & DataStore
     implementation(libs.androidx.security.crypto)
@@ -76,11 +76,8 @@ dependencies {
     implementation("com.google.mediapipe:tasks-audio:0.10.14")
     
     // OkHttp (for Gemini API calls)
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation(libs.okhttp)
 
-    testImplementation(libs.junit)
-    androidTestImplementation(libs.androidx.junit)
-    androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)

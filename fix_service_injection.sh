@@ -1,0 +1,2 @@
+sed -i 's/wakeWordEngine = WakeWordEngine(this)/wakeWordEngine = WakeWordEngine(this, wakeThreshold = settingsRepository.getWakeThreshold())/g' app/src/main/java/com/example/services/JarvisService.kt
+sed -i 's/geminiLiveClient = GeminiLiveClient(/geminiLiveClient = GeminiLiveClient(\n            systemInstruction = settingsRepository.getSystemPrompt(),\n/g' app/src/main/java/com/example/services/JarvisService.kt

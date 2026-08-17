@@ -1,6 +1,11 @@
 package com.example
 
+import android.app.ActivityManager
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.delay
+
 import android.content.Intent
+import android.content.Context
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -60,6 +65,14 @@ import com.example.ui.theme.SilverText
 import com.example.ui.theme.SurfaceBorder
 import com.example.ui.theme.SurfaceBorderHighlight
 import com.example.utils.PermissionsHelper
+import com.example.AssistantState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import com.example.services.TranscriptMessage
+
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -130,6 +143,8 @@ fun JarvisApp() {
     }
 }
 
+
+
 @Composable
 fun JarvisScreen(
     modifier: Modifier = Modifier,
@@ -137,7 +152,27 @@ fun JarvisScreen(
     onNavigateToPermissions: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    val settingsRepository = remember { SettingsRepository(context) }
+    
+    
+    // BUG-40 Fix: Observe service lifecycle directly via broadcast on resume
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                // Assume service might be dead, send ping to verify
+                JarvisServiceState.updateRunning(false)
+                val intent = android.content.Intent("com.example.ACTION_PING_SERVICE")
+                intent.setPackage(context.packageName)
+                context.sendBroadcast(intent)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    val settingsRepository = remember { SettingsRepository.getInstance(context) }
     val apiKey by settingsRepository.apiKeyFlow.collectAsStateWithLifecycle(initialValue = "")
 
     val isServiceRunning by JarvisServiceState.isRunning.collectAsStateWithLifecycle()
@@ -146,8 +181,11 @@ fun JarvisScreen(
 
     val hasAudio = PermissionsHelper.hasAudioPermission(context)
     val hasOverlay = PermissionsHelper.hasOverlayPermission(context)
+
     val hasNotif = PermissionsHelper.hasNotificationPermission(context)
     val corePermissionsGranted = hasAudio && hasOverlay
+    val transcriptList by JarvisServiceState.transcript.collectAsStateWithLifecycle()
+
 
     Column(
         modifier = modifier
@@ -275,6 +313,80 @@ fun JarvisScreen(
             }
         }
 
+
+        // Transcript History View
+        if (transcriptList.isNotEmpty()) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 8.dp)
+                    .height(200.dp),
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, SurfaceBorder),
+                colors = CardDefaults.cardColors(containerColor = DarkCharcoal)
+            ) {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(12.dp),
+                    reverseLayout = true
+                ) {
+                    items(transcriptList.reversed()) { msg ->
+                        val timeString = remember(msg.timestamp) {
+                            SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(msg.timestamp))
+                        }
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            horizontalAlignment = if (msg.isUser) Alignment.End else Alignment.Start
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (!msg.isUser) {
+                                    Text(
+                                        text = "JARVIS",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = PureWhite,
+                                        fontWeight = FontWeight.Black,
+                                        letterSpacing = 1.sp
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                }
+                                Text(
+                                    text = timeString,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = SilverText,
+                                    fontSize = 9.sp
+                                )
+                                if (msg.isUser) {
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "USER",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = SilverText,
+                                        fontWeight = FontWeight.Black,
+                                        letterSpacing = 1.sp
+                                    )
+                                }
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (msg.isUser) DarkCardSurface else PureWhite.copy(alpha = 0.1f),
+                                modifier = Modifier.padding(top = 4.dp)
+                            ) {
+                                Text(
+                                    text = msg.text,
+                                    color = PureWhite,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.padding(10.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -350,7 +462,7 @@ fun JarvisScreen(
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Runs local wake-word listener ('Hey Jarvis') in an Android Foreground Service. Floating alien HUD 👽 appears when spoken to.",
+                        text = "Runs local wake-word listener ('yes'/'go') in an Android Foreground Service. Floating alien HUD 👽 appears when spoken to.",
                         style = MaterialTheme.typography.bodySmall,
                         color = SilverText
                     )
@@ -380,7 +492,7 @@ fun JarvisScreen(
                                 } else {
                                     context.startService(serviceIntent)
                                 }
-                                Toast.makeText(context, "JARVIS Active! Listening for 'Hey Jarvis'...", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "JARVIS Active! Listening for 'yes'/'go'...", Toast.LENGTH_SHORT).show()
                             }
                         },
                         modifier = Modifier
@@ -476,19 +588,68 @@ fun JarvisScreen(
                     Spacer(modifier = Modifier.height(10.dp))
 
                     ArchitectureFeatureRow(
-                        title = "Local Wake-Word Listener ('Hey Jarvis')",
+                        title = "Local Wake-Word Listener ('yes'/'go')",
                         subtitle = "TFLite / Energy VAD engine",
-                        isActive = hasAudio
+                        isActive = hasAudio && isServiceRunning
                     )
                     ArchitectureFeatureRow(
                         title = "Gemini 2.5 Live Voice",
                         subtitle = "Direct WebSocket audio streaming",
-                        isActive = apiKey.isNotBlank()
+                        isActive = apiKey.isNotBlank() && isServiceRunning
                     )
                     ArchitectureFeatureRow(
                         title = "Activated Alien HUD 👽 Overlay",
                         subtitle = "Appears only on wake-word trigger",
-                        isActive = hasOverlay
+                        isActive = hasOverlay && isServiceRunning
+                    )
+                }
+            }
+
+
+            // 5. Text Input Row for Gemini
+            var textQuery by remember { mutableStateOf("") }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = textQuery,
+                    onValueChange = { textQuery = it },
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("Type a message to JARVIS...", color = SilverText.copy(alpha = 0.6f)) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = PureWhite,
+                        unfocusedBorderColor = SurfaceBorder,
+                        focusedTextColor = PureWhite,
+                        unfocusedTextColor = PureWhite,
+                        cursorColor = PureWhite
+                    ),
+                    shape = RoundedCornerShape(24.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                IconButton(
+                    onClick = {
+                        if (textQuery.isNotBlank() && isServiceRunning) {
+                            val intent = android.content.Intent("com.example.ACTION_SEND_TEXT")
+                            intent.setPackage(context.packageName)
+                            intent.putExtra("TEXT_QUERY", textQuery)
+                            context.startService(intent)
+                            textQuery = ""
+                        } else if (!isServiceRunning) {
+                            Toast.makeText(context, "System Offline", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    modifier = Modifier
+                        .size(48.dp)
+                        .background(if (textQuery.isNotBlank() && isServiceRunning) PureWhite else DarkCharcoal, CircleShape)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Send Text",
+                        tint = if (textQuery.isNotBlank() && isServiceRunning) OledBlack else SilverText
                     )
                 }
             }

@@ -22,7 +22,7 @@ class WakeWordEngine(
     private val context: Context,
     private val wakeThreshold: Float = 0.50f,
     private val cooldownMs: Long = 2000L,
-    private val targetLabels: Set<String> = setOf("hey_jarvis", "jarvis", "hey jarvis")
+    private val targetLabels: Set<String> = setOf("yes", "go")
 ) {
 
     sealed class EngineState {
@@ -154,7 +154,7 @@ class WakeWordEngine(
                 System.arraycopy(chunk, 0, windowBuffer, bufferPos, copyLength)
                 bufferPos += copyLength
 
-                if (bufferPos >= 8000) {
+                if (bufferPos >= 15600) {
                     try {
                         audioData?.load(windowBuffer, 0, bufferPos)
                         bufferPos = 0
@@ -221,15 +221,13 @@ class WakeWordEngine(
 
     private fun loadModelFile(context: Context, modelPath: String): MappedByteBuffer? {
         return try {
-            val fileDescriptor = context.assets.openFd(modelPath)
-            val inputStream = java.io.FileInputStream(fileDescriptor.fileDescriptor)
-            val fileChannel = inputStream.channel
-            val startOffset = fileDescriptor.startOffset
-            val declaredLength = fileDescriptor.declaredLength
-            val buffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
-            fileDescriptor.close()
-            inputStream.close()
-            buffer
+            context.assets.openFd(modelPath).use { fileDescriptor ->
+                java.io.FileInputStream(fileDescriptor.fileDescriptor).use { inputStream ->
+                    inputStream.channel.use { fileChannel ->
+                        fileChannel.map(FileChannel.MapMode.READ_ONLY, fileDescriptor.startOffset, fileDescriptor.declaredLength)
+                    }
+                }
+            }
         } catch (e: Exception) {
             null
         }

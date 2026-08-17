@@ -1,0 +1,1 @@
+sed -i 's/Icon(imageVector = if (state == AssistantState.ERROR) Icons.Default.Warning else Icons.Default.SmartToy, contentDescription = null, tint = OledBlack, modifier = Modifier.size(24.dp) ) \/\/ Text(/Text(/g' app/src/main/java/com/example/ui/screens/JarvisOverlay.kt

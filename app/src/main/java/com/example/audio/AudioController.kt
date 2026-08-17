@@ -1,22 +1,31 @@
 package com.example.audio
 
-import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
 import android.util.Log
 import androidx.core.content.ContextCompat
-import com.example.AppState
-import com.example.AssistantStateManager
+import com.example.AssistantState
+import com.example.services.JarvisServiceState
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.combine
+import kotlin.math.sqrt
 
+@SuppressLint("StaticFieldLeak")
 object AudioController {
+
+    private const val SAMPLE_RATE = 16000
+    private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
+    private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
+    private const val VAD_THRESHOLD = 1500.0 // RMS threshold for voice detection
+
     private var audioRecord: AudioRecord? = null
     private var recordingJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -27,85 +36,144 @@ object AudioController {
     private val _geminiAudioFlow = MutableSharedFlow<ShortArray>(extraBufferCapacity = 64)
     val geminiAudioFlow: SharedFlow<ShortArray> = _geminiAudioFlow.asSharedFlow()
 
+    private val _userSpeakingFlow = MutableSharedFlow<Boolean>(extraBufferCapacity = 1)
+    val userSpeakingFlow: SharedFlow<Boolean> = _userSpeakingFlow.asSharedFlow()
+
     private var appContext: Context? = null
     private var stateObserverJob: Job? = null
+    private var aec: AcousticEchoCanceler? = null
 
     fun init(context: Context) {
         appContext = context.applicationContext
         
         stateObserverJob?.cancel()
         stateObserverJob = scope.launch {
-            AssistantStateManager.appState.collect { state ->
-                when (state) {
-                    AppState.IDLE -> stopRecording()
-                    AppState.WAKE_LISTENING, AppState.ACTIVE_CONVERSATION -> startRecording()
+            combine(
+                JarvisServiceState.isRunning,
+                JarvisServiceState.assistantState
+            ) { isRunning, state ->
+                Pair(isRunning, state)
+            }.collect { (isRunning, state) ->
+                if (isRunning && state != AssistantState.ERROR) {
+                    startRecording()
+                } else {
+                    stopRecording()
                 }
             }
         }
     }
 
+    private fun calculateRMS(buffer: ShortArray): Double {
+        var sum = 0.0
+        for (sample in buffer) {
+            sum += sample * sample
+        }
+        return sqrt(sum / buffer.size)
+    }
+
+    private var retryJob: Job? = null
+
     @SuppressLint("MissingPermission")
     private fun startRecording() {
-        val context = appContext
-        if (context == null) {
-            Log.e("AudioController", "AudioController not initialized with context.")
-            return
-        }
-
-        if (audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) return
-
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            Log.e("AudioController", "RECORD_AUDIO permission missing.")
-            return
-        }
-
-        try {
-            val sampleRate = 16000
-            val channelConfig = AudioFormat.CHANNEL_IN_MONO
-            val audioFormat = AudioFormat.ENCODING_PCM_16BIT
-            val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
-            val bufferSize = (minBufferSize * 2).coerceAtLeast(4096)
-
-            if (audioRecord == null || audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                audioRecord = AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
-                    sampleRate,
-                    channelConfig,
-                    audioFormat,
-                    bufferSize
-                )
-            }
-
-            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                Log.e("AudioController", "AudioRecord failed to initialize")
-                audioRecord = null
-                return
-            }
-
-            audioRecord?.startRecording()
-            Log.d("AudioController", "Audio capture started")
-
-            recordingJob?.cancel()
-            recordingJob = scope.launch {
-                val buffer = ShortArray(1024)
-                while (isActive && audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
-                    val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
-                    if (read > 0) {
-                        val chunk = buffer.copyOfRange(0, read)
-                        when (AssistantStateManager.appState.value) {
-                            AppState.WAKE_LISTENING -> _wakeWordAudioFlow.tryEmit(chunk)
-                            AppState.ACTIVE_CONVERSATION -> _geminiAudioFlow.tryEmit(chunk)
-                            AppState.IDLE -> { /* Drop */ }
-                        }
-                    } else {
-                        delay(5)
+        retryJob?.cancel()
+        retryJob = scope.launch {
+            var attempt = 0
+            val maxAttempts = 5
+            while (attempt < maxAttempts) {
+                if (audioRecord != null && audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                    return@launch
+                }
+                val context = appContext ?: return@launch
+                if (ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    Log.e("AudioController", "Missing RECORD_AUDIO permission")
+                    return@launch
+                }
+                try {
+                    val minBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
+                    audioRecord = AudioRecord(
+                        MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                        SAMPLE_RATE,
+                        CHANNEL_CONFIG,
+                        AUDIO_FORMAT,
+                        minBufferSize * 2
+                    )
+                    
+                    if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                        Log.e("AudioController", "AudioRecord failed to initialize, attempt ${attempt + 1}")
+                        audioRecord?.release()
+                        audioRecord = null
+                        attempt++
+                        kotlinx.coroutines.delay(1000L * attempt)
+                        continue
                     }
+                    
+                    if (AcousticEchoCanceler.isAvailable()) {
+                        try {
+                            aec?.release()
+                            val sessionId = audioRecord?.audioSessionId ?: -1
+                            if (sessionId != -1) {
+                                aec = AcousticEchoCanceler.create(sessionId)
+                                aec?.enabled = true
+                                Log.d("AudioController", "AEC enabled on session $sessionId")
+                            }
+                        } catch (e: Exception) {
+                            Log.e("AudioController", "Failed to enable AEC", e)
+                        }
+                    }
+                    
+                    audioRecord?.startRecording()
+                    Log.d("AudioController", "Audio capture started")
+                    
+                    recordingJob?.cancel()
+                    recordingJob = scope.launch {
+                        val buffer = ShortArray(780)
+                        var consecutiveSpeechFrames = 0
+                        
+                        while (isActive && audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                            val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+                            if (read > 0) {
+                                val chunk = buffer.copyOfRange(0, read)
+                                val isRunning = JarvisServiceState.isRunning.value
+                                val state = JarvisServiceState.assistantState.value
+                                
+                                if (isRunning) {
+                                    if (state == AssistantState.IDLE) {
+                                        _wakeWordAudioFlow.tryEmit(chunk)
+                                    } else {
+                                        _geminiAudioFlow.tryEmit(chunk)
+                                        
+                                        // Local VAD for Barge-in logic
+                                        val rms = calculateRMS(chunk)
+                                        if (rms > VAD_THRESHOLD) {
+                                            consecutiveSpeechFrames++
+                                            if (consecutiveSpeechFrames == 3) {
+                                                _userSpeakingFlow.tryEmit(true)
+                                            }
+                                        } else {
+                                            if (consecutiveSpeechFrames >= 3) {
+                                                _userSpeakingFlow.tryEmit(false)
+                                            }
+                                            consecutiveSpeechFrames = 0
+                                        }
+                                    }
+                                }
+                            } else {
+                                kotlinx.coroutines.delay(5)
+                            }
+                        }
+                    }
+                    break // Successfully started recording, exit the retry loop
+                } catch (e: Exception) {
+                    Log.e("AudioController", "Failed to start audio capture", e)
+                    attempt++
+                    kotlinx.coroutines.delay(1000L * attempt)
                 }
             }
-        } catch (e: Exception) {
-            Log.e("AudioController", "Failed to start audio capture", e)
+            
+            if (attempt >= maxAttempts) {
+                Log.e("AudioController", "Exhausted all attempts to initialize AudioRecord")
+                JarvisServiceState.setError("Microphone unavailable after multiple attempts.")
+            }
         }
     }
 
@@ -116,6 +184,11 @@ object AudioController {
         recordingJob = null
 
         try {
+            aec?.release()
+        } catch (_: Exception) {}
+        aec = null
+
+        try {
             audioRecord?.stop()
             audioRecord?.release()
         } catch (e: Exception) {
@@ -123,5 +196,11 @@ object AudioController {
         }
         audioRecord = null
         Log.d("AudioController", "Audio capture stopped and released")
+    }
+
+    fun destroy() {
+        stateObserverJob?.cancel()
+        stateObserverJob = null
+        stopRecording()
     }
 }

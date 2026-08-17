@@ -1,0 +1,1 @@
+sed -i '/val geminiAudioFlow/a \    private val _userSpeakingFlow = MutableSharedFlow<Boolean>(extraBufferCapacity = 1)\n    val userSpeakingFlow: SharedFlow<Boolean> = _userSpeakingFlow.asSharedFlow()' app/src/main/java/com/example/audio/AudioController.kt

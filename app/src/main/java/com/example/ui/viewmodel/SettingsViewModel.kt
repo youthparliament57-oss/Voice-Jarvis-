@@ -46,6 +46,19 @@ class SettingsViewModel(private val repository: SettingsRepository) : ViewModel(
             initialValue = ""
         )
 
+
+    val systemPrompt: StateFlow<String> = repository.systemPromptFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "")
+        
+    val modelName: StateFlow<String> = repository.modelNameFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "")
+        
+    val wakeThreshold: StateFlow<Float> = repository.wakeThresholdFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0.5f)
+        
+    val sessionTimeout: StateFlow<Long> = repository.sessionTimeoutFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 120_000L)
+
     private val _validationState = MutableStateFlow<ValidationState>(ValidationState.Idle)
     val validationState: StateFlow<ValidationState> = _validationState.asStateFlow()
 
@@ -93,6 +106,23 @@ class SettingsViewModel(private val repository: SettingsRepository) : ViewModel(
                 _saveStatus.value = SaveStatus.Success("API Key cleared from device")
             }
         }
+    }
+
+
+    fun saveSystemPrompt(prompt: String) {
+        viewModelScope.launch { repository.saveSystemPrompt(prompt) }
+    }
+    
+    fun saveModelName(name: String) {
+        viewModelScope.launch { repository.saveModelName(name) }
+    }
+    
+    fun saveWakeThreshold(threshold: Float) {
+        viewModelScope.launch { repository.saveWakeThreshold(threshold) }
+    }
+    
+    fun saveSessionTimeout(timeoutMs: Long) {
+        viewModelScope.launch { repository.saveSessionTimeout(timeoutMs) }
     }
 
     fun clearValidationState() {
